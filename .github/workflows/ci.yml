@@ -1,5 +1,5 @@
-# Builds Envide with EnvoScale at envoscale.ref and runs its tests on Linux and Windows;
-# on Linux it also opens Envide's window under a virtual X server and draws a frame.
+# Builds EnvIDE with EnvoScale at envolang.ref and runs its tests on Linux and Windows;
+# on Linux it also opens EnvIDE's window under a virtual X server and draws a frame.
 name: ci
 
 on:
@@ -53,7 +53,7 @@ jobs:
           name: envide-windows
           path: envide-x86_64-windows.exe
 
-  # A tag v* publishes Envide for Linux and Windows.
+  # A tag v* publishes EnvIDE for Linux and Windows.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [linux, windows]
@@ -68,4 +68,4 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envide $GITHUB_REF_NAME" --notes "The Envide shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "EnvIDE $GITHUB_REF_NAME" --notes "The EnvIDE shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envolang.ref."

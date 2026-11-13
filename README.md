@@ -1,24 +1,24 @@
-<img src="https://raw.githubusercontent.com/envoscale/EnvoScale/main/docs/images/logo.svg" alt="" width="56" align="left">
+<img src="https://raw.githubusercontent.com/envoscale/.github/main/profile/assets/logo.svg" alt="" width="56" align="left">
 
-# Envide
+# EnvIDE
 
-A code editor and IDE written in [Envol](https://github.com/envoscale/EnvoScale), drawn
-with [Envoui](https://github.com/envoscale/Envoui) and [Envor](https://github.com/envoscale/Envor):
+A code editor and IDE written in [EnvoL](https://github.com/envoscale/EnvoLang), drawn
+with [EnvoUI](https://github.com/envoscale/EnvoUI) and [EnvoR](https://github.com/envoscale/EnvoR):
 no third-party code, and the same pixels on Windows and Linux.
 
 <p align="center">
-  <img src="docs/envide-dark.png" alt="Envide in the dark theme: the EnvoScale repository in the sidebar with examples/02-shapes open, and its main.envol in the editor" width="100%">
+  <img src="docs/envide-dark.png" alt="EnvIDE in the dark theme: the EnvoLang repository in the sidebar with examples/02-shapes open, and its main.envol in the editor" width="100%">
 </p>
 
 <p align="center">
-  <img src="docs/envide-light.png" alt="Envide in the light theme, with examples/03-generics/main.envol open" width="100%">
+  <img src="docs/envide-light.png" alt="EnvIDE in the light theme, with examples/03-generics/main.envol open" width="100%">
 </p>
 
-Both pictures are Envide drawing itself, without a window:
+Both pictures are EnvIDE drawing itself, without a window:
 
 ```bash
-envide path/to/EnvoScale examples/02-shapes/main.envol --screenshot dark.ppm --size 1280x760
-envide path/to/EnvoScale examples/03-generics/main.envol --screenshot light.ppm --light --size 1280x760
+envide path/to/EnvoLang examples/02-shapes/main.envol --screenshot dark.ppm --size 1280x760
+envide path/to/EnvoLang examples/03-generics/main.envol --screenshot light.ppm --light --size 1280x760
 ```
 
 ## What it does
@@ -35,12 +35,12 @@ build, run, test and debug.
 ## Use
 
 ```bash
-./build.sh run                         # build, then open Envide on this folder
+./build.sh run                         # build, then open EnvIDE on this folder
 build/envide <folder> [file]           # open a folder, and a file in it
 ```
 
-`./build.sh` clones EnvoScale at the commit in [`envoscale.ref`](envoscale.ref) and builds
-it (about a minute, once); set `ENVOSCALE` to use a checkout of your own. `./build.sh
+`./build.sh` clones EnvoLang at the commit in [`envolang.ref`](envolang.ref) and builds
+it (about a minute, once); set `ENVOLANG` to use a checkout of your own. `./build.sh
 test` runs the tests.
 
 ## Code
@@ -51,7 +51,7 @@ test` runs the tests.
 | [`main.envol`](main.envol) | Arguments, then the window and its loop, or one frame into an image |
 | [`tests/`](tests) | Tests, run by `envo test` |
 
-Anything Envide needs from the operating system is a port in EnvoScale's library with
+Anything EnvIDE needs from the operating system is a port in the EnvoL library with
 adapters there, never code here.
 
 ## License

@@ -1,4 +1,4 @@
-// Envide in a window: the shell (shell.envol), drawn each time nothing is waiting.
+// EnvIDE in a window: the shell (shell.envol), drawn each time nothing is waiting.
 //
 //   envide [folder] [file]               open folder (default: the current one), and file in it
 //   envide ... --one-frame               draw one frame in a window and quit (CI)
@@ -47,7 +47,7 @@ if (folder.Len == 0) folder = cwd.AsStr();
 
 var loaded = font.System("monospace");
 if (loaded.IsErr()) {
-    print("Envide needs a monospace font, and this system has none it knows");
+    print("EnvIDE needs a monospace font, and this system has none it knows");
     return 1;
 }
 font.Font f = loaded.Unwrap();
@@ -72,8 +72,8 @@ if (shot.Len > 0) {
 }
 
 var w = platform.Window();
-if (!w.Open("Envide", width as u32, height as u32)) {
-    print("Envide needs a desktop: this system cannot open a window");
+if (!w.Open("EnvIDE", width as u32, height as u32)) {
+    print("EnvIDE needs a desktop: this system cannot open a window");
     return 1;
 }
 u32 ww = w.Width();

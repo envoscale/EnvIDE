@@ -1,4 +1,4 @@
-// The Envide window: the folder's files in a sidebar (folders open and close), the editor
+// The EnvIDE window: the folder's files in a sidebar (folders open and close), the editor
 // area with a tab for the open file, and a status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
 // window, a browser page or a terminal, and the tests drive it with events, no window.
 use envoui as ui;

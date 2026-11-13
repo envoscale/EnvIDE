@@ -1,12 +1,12 @@
 #!/bin/sh
-# Builds and tests Envide with EnvoScale at the commit in envoscale.ref.
+# Builds and tests Envide with EnvoScale at the commit in envolang.ref.
 #
 #   ./build.sh build   build/envide (build/envide.exe on Windows)
 #   ./build.sh test    the tests in tests/
 #   ./build.sh run     build, then open Envide on this folder
 #
-# EnvoScale comes from $ENVOSCALE if set (a checkout you work on, used as it is), else
-# ./envoscale, cloned and built at envoscale.ref on first use.
+# EnvoScale comes from $ENVOLANG if set (a checkout you work on, used as it is), else
+# ./envolang, cloned and built at envolang.ref on first use.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
@@ -16,22 +16,22 @@ fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=.exe ;; *) EXE= ;; esac
 
 toolchain() {
-    if [ -n "${ENVOSCALE:-}" ]; then
-        ES=$(cd "$ENVOSCALE" && pwd)
-        [ -x "$ES/build/envo/envo$EXE" ] || (cd "$ES" && ./build.sh build) || fail 'building EnvoScale failed'
+    if [ -n "${ENVOLANG:-}" ]; then
+        ES=$(cd "$ENVOLANG" && pwd)
+        [ -x "$ES/build/envo/envo$EXE" ] || (cd "$ES" && ./build.sh build) || fail 'building EnvoLang failed'
     else
-        ES="$ROOT/envoscale"
-        ref=$(tr -d '\r\n ' < "$ROOT/envoscale.ref")
+        ES="$ROOT/envolang"
+        ref=$(tr -d '\r\n ' < "$ROOT/envolang.ref")
         if [ ! -d "$ES/.git" ]; then
-            say "clone     https://github.com/envoscale/EnvoScale -> envoscale/"
-            git clone -q https://github.com/envoscale/EnvoScale "$ES" || fail 'cloning EnvoScale failed'
+            say "clone     https://github.com/envoscale/EnvoLang -> envolang/"
+            git clone -q https://github.com/envoscale/EnvoLang "$ES" || fail 'cloning EnvoLang failed'
         fi
         if [ "$(git -C "$ES" rev-parse HEAD)" != "$ref" ]; then
             git -C "$ES" fetch -q origin || true
-            git -C "$ES" -c advice.detachedHead=false checkout -q "$ref" || fail "envoscale/: cannot check out $ref"
+            git -C "$ES" -c advice.detachedHead=false checkout -q "$ref" || fail "envolang/: cannot check out $ref"
             rm -f "$ES/build/envo/envo$EXE"
         fi
-        [ -x "$ES/build/envo/envo$EXE" ] || (cd "$ES" && ./build.sh build) || fail 'building EnvoScale failed'
+        [ -x "$ES/build/envo/envo$EXE" ] || (cd "$ES" && ./build.sh build) || fail 'building EnvoLang failed'
     fi
     ENVO="$ES/build/envo/envo$EXE"
 }
