@@ -1,0 +1,80 @@
+// The shell, driven with window events and laid out in terminal cells, so it needs no
+// window and no font.
+// expect: sidebar: lib, src, notes.md
+// expect: sidebar is left of the editor: true
+// expect: status bar under the editor: true
+// expect: <folder>    Ln 1, Col 1
+// expect: <folder>    Ln 1, Col 3
+// expect: <folder>    Ln 2, Col 1
+// expect: text: hi|
+// expect: quit: false
+// expect: quit: true
+use envo.lumen;
+use ports.{Event, EventKind, KEY_A, KEY_ENTER, MOD_CTRL, MOD_SHIFT};
+use std.fs;
+
+fs.CreateDirAll("shell-test/src");
+fs.CreateDirAll("shell-test/lib");
+fs.CreateDirAll("shell-test/.git");
+fs.WriteText("shell-test/notes.md", "# Notes\n");
+fs.WriteText("shell-test/.hidden", "");
+
+Shell s = NewShell("shell-test");
+lumen.Theme th = lumen.Dark();
+s.T.LayoutCells(th, 100, 30);
+
+string items = string.From("sidebar: ");
+for (usize i = 0; i < s.T.ItemCount(s.Files); i++) {
+    if (i > 0) items.Append(", ");
+    items.Append(s.T.ItemText(s.Files, i));
+}
+print(items.AsStr());
+print(Say("sidebar is left of the editor: ", s.T.X(s.Files) + s.T.Width(s.Files) <= s.T.X(s.Editor)).AsStr());
+print(Say("status bar under the editor: ", s.T.Y(s.Status) >= s.T.Y(s.Editor) + s.T.Height(s.Editor)).AsStr());
+
+Status(ref s);
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'h' as u32));
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'i' as u32));
+Status(ref s);
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+Status(ref s);
+string body = s.T.Buffer(s.Editor)[0].Text();
+string shown = string.New();
+for (usize i = 0; i < body.Len(); i++) {
+    u8 c = body.AsStr()[i];
+    if (c == 10) shown.Append("|");
+    else shown.AppendByte(c);
+}
+print(Say2("text: ", shown.AsStr()).AsStr());
+
+// Ctrl+Shift+P, then "qu" and Enter: the palette's Quit
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 15).WithMods(MOD_CTRL | MOD_SHIFT));
+s.T.LayoutCells(th, 100, 30);
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'q' as u32));
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'u' as u32));
+print(Say("quit: ", s.Quit).AsStr());
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+print(Say("quit: ", s.Quit).AsStr());
+
+// The status bar's text, with the folder's name in place of its path.
+void Status(ref Shell s) {
+    string t = s.StatusText();
+    str all = t.AsStr();
+    string out2 = string.From("<folder>");
+    usize at = 0;
+    while (at < all.Len && all[at] != ' ') at++;
+    for (usize i = at; i < all.Len; i++) out2.AppendByte(all[i]);
+    print(out2.AsStr());
+}
+
+string Say(str what, bool b) {
+    string s = string.From(what);
+    if (b) s.Append("true"); else s.Append("false");
+    return s;
+}
+
+string Say2(str a, str b) {
+    string s = string.From(a);
+    s.Append(b);
+    return s;
+}

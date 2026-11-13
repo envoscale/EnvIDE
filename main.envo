@@ -1,0 +1,48 @@
+// Envo Studio in a window: the shell (shell.envo), drawn each time nothing is waiting.
+// `studio --one-frame` draws one frame and quits, for CI.
+use envo.gfx;
+use envo.font;
+use envo.lumen;
+use ports.{EventKind};
+use std.env;
+use platform;
+
+bool oneFrame = env.ArgCount() > 1 && SameText(env.Arg(1), "--one-frame");
+var loaded = font.System("monospace");
+if (loaded.IsErr()) {
+    print("Envo Studio needs a monospace font, and this system has none it knows");
+    return 1;
+}
+font.Font f = loaded.Unwrap();
+lumen.Theme th = lumen.Dark();
+Shell s = NewShell(env.CurrentDir().AsStr());
+
+var w = platform.Window();
+if (!w.Open("Envo Studio", 1100, 700)) {
+    print("Envo Studio needs a desktop: this system cannot open a window");
+    return 1;
+}
+u32 width = w.Width();
+u32 height = w.Height();
+gfx.Canvas c = gfx.Canvas.New(width as i32, height as i32);
+while (w.IsOpen() && !s.Quit) {
+    var e = w.Poll();
+    if (e.Is(EventKind.None)) {
+        s.T.LayoutPixels(f, th, width as i32, height as i32);
+        s.T.DrawPixels(ref c, f, th);
+        w.Present(c.Pixels(), width, height);
+        if (oneFrame) {
+            print("studio: drew a frame");
+            break;
+        }
+        continue;
+    }
+    if (e.Is(EventKind.Resize)) {
+        width = w.Width();
+        height = w.Height();
+        c = gfx.Canvas.New(width as i32, height as i32);
+        continue;
+    }
+    s.OnEvent(e);
+}
+if (w.IsOpen()) w.Close();

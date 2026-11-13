@@ -1,0 +1,104 @@
+// The Studio window: the folder's files in a sidebar, the editor area with its tabs, and a
+// status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
+// window, a browser page or a terminal, and the tests drive it with events, no window.
+use envo.ui;
+use envo.edit;
+use ports.{Event, EventKind, KEY_A, MOD_CTRL, MOD_SHIFT};
+use std.fs;
+use std.path;
+use alloc.text;
+
+const str KEYWORDS = "use namespace struct enum interface impl public private static const var if else for foreach while do break continue return match in ref mut new true false null as is";
+
+// The palette's commands, in the order they are listed.
+const str CMD_QUIT = "Quit";
+
+struct Shell {
+    ui.Tree T;
+    u32 Files;       // the sidebar
+    u32 Tabs;
+    u32 Editor;
+    u32 Status;      // the status bar's text
+    u32 Palette;
+    string Folder;
+    bool Quit;       // the user chose Quit
+
+    // What the status bar says: the folder, and where the cursor is.
+    public string StatusText(ref this) {
+        edit.Pos p = this.T.Buffer(this.Editor)[0].Cursor();
+        string s = string.From(this.Folder.AsStr());
+        s.Append("    Ln ");
+        s.Append(text.Int((p.Line + 1) as i64).AsStr());
+        s.Append(", Col ");
+        s.Append(text.Int((p.Col + 1) as i64).AsStr());
+        return s;
+    }
+
+    public void UpdateStatus(ref this) {
+        string s = this.StatusText();
+        this.T.SetText(this.Status, s.AsStr());
+    }
+
+    // Handles one window event: Ctrl+Shift+P opens the palette, everything else goes to
+    // the component it is for.
+    public void OnEvent(ref this, Event e) {
+        if (e.Is(EventKind.KeyDown) && e.Ctrl() && e.Shift() && e.Code() == KEY_A + 15) {
+            this.T.OpenPalette(this.Palette);
+            return;
+        }
+        u32 id = this.T.OnEvent(e);
+        if (id == this.Palette && this.T.Action() == ui.ACT_OPEN) {
+            if (SameText(this.T.ItemText(this.Palette, this.T.Item()), CMD_QUIT)) this.Quit = true;
+        }
+        this.UpdateStatus();
+    }
+}
+
+// The shell for folder: its entries in the sidebar (folders first, hidden ones left
+// out), and an empty editor with the focus.
+Shell NewShell(str folder) {
+    ui.Tree t = ui.Tree.New();
+    u32 body = t.Split(t.Root(), false);
+    t.SetGrow(body, 1);
+    t.SetRatio(body, 220);
+    u32 files = t.TreeView(body);
+    u32 area = t.Column(body);
+    u32 tabs = t.Tabs(area, true);
+    t.AddItem(tabs, "untitled", 0);
+    u32 ed = t.Editor(area, "");
+    t.SetGrow(ed, 1);
+    t.SetSyntax(ed, KEYWORDS, "//");
+    u32 status = t.Text(t.Root(), "", ui.CAPTION);
+    u32 pal = t.Palette(t.Root());
+    t.AddItem(pal, CMD_QUIT, 0);
+    t.SetFocus(ed);
+    Shell s = new Shell { T = t, Files = files, Tabs = tabs, Editor = ed, Status = status, Palette = pal, Folder = string.From(folder), Quit = false };
+    ListFolder(ref s.T, files, folder);
+    s.UpdateStatus();
+    return s;
+}
+
+void ListFolder(ref ui.Tree t, u32 files, str folder) {
+    t.ClearItems(files);
+    var r = fs.ListDir(folder);
+    if (r.IsErr()) return;
+    List<string> names = r.Unwrap();
+    for (u32 pass = 0; pass < 2; pass++) {
+        for (usize i = 0; i < names.Len(); i++) {
+            str n = names.AsSlice()[i].AsStr();
+            if (n.Len == 0 || n[0] == '.') continue;
+            string full = path.Join(folder, n);
+            bool dir = fs.IsDir(full.AsStr());
+            if (dir != (pass == 0)) continue;
+            t.AddItem(files, n, 0);
+        }
+    }
+}
+
+bool SameText(str a, str b) {
+    if (a.Len != b.Len) return false;
+    for (usize i = 0; i < a.Len; i++) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+}
