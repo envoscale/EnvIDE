@@ -61,11 +61,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: out
           merge-multiple: true
+      # the notes are .github/release-notes/<tag>.md
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "EnvIDE $GITHUB_REF_NAME" --notes "EnvIDE, a code editor written in EnvoL, for Linux and Windows. Run it with a folder, and a file to open: envide <folder> [file]. A sidebar with the folder's tree, tabs, the editor with syntax colors, a status bar and a command palette (Ctrl+Shift+P); --screenshot draws a frame into an image. Built with EnvoLang at the commit in envolang.ref. Apache-2.0."
+          notes=".github/release-notes/$GITHUB_REF_NAME.md"
+          test -f "$notes" || { echo "missing $notes"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "EnvIDE $GITHUB_REF_NAME" --notes-file "$notes"
