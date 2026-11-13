@@ -23,6 +23,11 @@ jobs:
           out=$(xvfb-run -a build/studio --one-frame)
           echo "$out"
           [ "$out" = "studio: drew a frame" ]
+      - run: cp build/studio studio-x86_64-linux
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: studio-linux
+          path: studio-x86_64-linux
 
   windows:
     runs-on: windows-latest
@@ -34,3 +39,25 @@ jobs:
         shell: bash
       - run: ./build.sh build
         shell: bash
+      - run: cp build/studio.exe studio-x86_64-windows.exe
+        shell: bash
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: studio-windows
+          path: studio-x86_64-windows.exe
+
+  # A tag v* publishes Studio for Linux and Windows.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: out
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envo Studio $GITHUB_REF_NAME" --notes "The Studio shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."

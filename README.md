@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/envoscale/EnvoScale/main/docs/images/logo.svg" alt="" width="56" align="left">
+
 # Envo Studio
 
 A code editor and IDE written in [Envo](https://github.com/envoscale/EnvoScale), on Envo's
