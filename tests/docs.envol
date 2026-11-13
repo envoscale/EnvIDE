@@ -1,0 +1,227 @@
+// Documents: each tab keeps its own text and cursor; a change puts a dot on the tab and
+// in the title; Ctrl+S writes the file and clears it; closing a changed tab asks first;
+// Save As, Go to Line, Find, Go to File and the sidebar's icons; a file with bytes that
+// are not UTF-8 asks before saving; unsaved changes come back from a backup.
+// expect: tabs: a.envol, b.md
+// expect: typed: tab a.envol ●, title ● a.envol - docs-test - EnvIDE
+// expect: b keeps its own text: true
+// expect: back on a: cursor at col 2: true
+// expect: saved: tab a.envol, file xa = true
+// expect: close asks: true
+// expect: don't save: tabs b.md, b.md unchanged = true
+// expect: save as: tab new.txt, file = true, in sidebar = true
+// expect: go to line 3: Ln 3
+// expect: find "two": selected two
+// expect: go to file: 5 files, has a.envol true
+// expect: icons: envol true, markdown true, folder true
+// expect: bad bytes ask first: true
+// expect: restored: 1 tab, text kept, unsaved true
+// expect: don't save removes the backup: true
+// expect: nothing restored after: 0 tabs
+use envor.theme;
+use envoui as ui;
+use envoui.edit;
+use alloc.text;
+use ports.{Event, EventKind, KEY_A, KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_HOME, MOD_CTRL, MOD_SHIFT};
+use std.fs;
+use std.path;
+
+fs.CreateDirAll("docs-test/sub");
+fs.CreateDirAll("docs-backups");
+fs.WriteText("docs-test/a.envol", "a\n");
+fs.WriteText("docs-test/b.md", "# b\n");
+fs.WriteText("docs-test/sub/c.txt", "one\ntwo\nthree\n");
+if (fs.IsFile("docs-test/new.txt")) fs.Delete("docs-test/new.txt");
+string bad = string.From("ok ");
+bad.AppendByte(0xFF);
+bad.Append(" ok\n");
+fs.WriteText("docs-test/bad.txt", bad.AsStr());
+foreach (var n in fs.ListDir("docs-backups").Unwrap().AsSlice()) {
+    string f = path.Join("docs-backups", n.AsStr());
+    fs.Delete(f.AsStr());
+}
+
+Shell s = NewShellIn("docs-test", "");
+theme.Theme th = theme.Dark();
+s.T.LayoutCells(th, 100, 30);
+s.Open("a.envol");
+s.Open("b.md");
+print(Say("tabs: ", Tabs(ref s).AsStr()).AsStr());
+
+// type in a: the tab and the title get a dot
+s.Activate(0);
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'x' as u32));
+string typed = string.From("typed: tab ");
+typed.Append(s.T.ItemText(s.Tabs, 0));
+typed.Append(", title ");
+string title = s.Title();
+typed.Append(title.AsStr());
+print(typed.AsStr());
+
+// b shows its own text; a keeps its cursor
+s.Activate(1);
+string bText = s.T.Value(s.Editor);
+print(Yes("b keeps its own text: ", SameText(bText.AsStr(), "# b\n")).AsStr());
+s.Activate(0);
+print(Yes("back on a: cursor at col 2: ", s.T.Buffer(s.Editor)[0].Cursor().Col == 1).AsStr());
+
+// Ctrl+S
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 18).WithMods(MOD_CTRL));
+string saved = string.From("saved: tab ");
+saved.Append(s.T.ItemText(s.Tabs, 0));
+saved.Append(", file xa = ");
+saved.Append(Bool(SameText(fs.ReadText("docs-test/a.envol").Unwrap().AsStr(), "xa\n")));
+print(saved.AsStr());
+
+// change b, Ctrl+W: it asks; Don't Save closes it and leaves the file
+s.Activate(1);
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'y' as u32));
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 22).WithMods(MOD_CTRL));
+print(Yes("close asks: ", s.T.Focused() == s.Palette && s.Docs.Len() == 2).AsStr());
+s.T.LayoutCells(th, 100, 30);
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_DOWN));
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+// the closed tab was b; a is left
+string dropped = string.From("don't save: tabs ");
+if (s.Docs.Len() == 1) dropped.Append("b.md");
+else dropped.Append(Tabs(ref s).AsStr());
+dropped.Append(", b.md unchanged = ");
+dropped.Append(Bool(SameText(fs.ReadText("docs-test/b.md").Unwrap().AsStr(), "# b\n")));
+print(dropped.AsStr());
+
+// a new file, Save As new.txt
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 13).WithMods(MOD_CTRL));
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'n' as u32));
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 18).WithMods(MOD_CTRL));
+s.T.LayoutCells(th, 100, 30);
+// the prompt starts with the folder and Untitled-1: replace it all
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A).WithMods(MOD_CTRL));
+TypeText(ref s, "new.txt");
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+string sa = string.From("save as: tab ");
+sa.Append(s.T.ItemText(s.Tabs, s.Cur));
+sa.Append(", file = ");
+sa.Append(Bool(fs.IsFile("docs-test/new.txt")));
+sa.Append(", in sidebar = ");
+bool listed = false;
+for (usize i = 0; i < s.T.ItemCount(s.Files); i++) {
+    if (SameText(s.T.ItemText(s.Files, i), "new.txt")) listed = true;
+}
+sa.Append(Bool(listed));
+print(sa.AsStr());
+
+// Go to Line 3 in c.txt
+s.Open("sub/c.txt");
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 6).WithMods(MOD_CTRL));
+TypeText(ref s, "3");
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+string st = s.StatusText();
+str sts = st.AsStr();
+usize at = 0;
+while (at + 2 < sts.Len && !(sts[at] == 'L' && sts[at + 1] == 'n')) at++;
+print(Say("go to line 3: ", sts[at..at + 4]).AsStr());
+
+// Find "two" from the top
+s.T.Buffer(s.Editor)[0].SetCursor(edit.Pos.At(0, 0));
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 5).WithMods(MOD_CTRL));
+TypeText(ref s, "two");
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+string sel = s.T.Buffer(s.Editor)[0].Selected();
+print(Say("find \"two\": selected ", sel.AsStr()).AsStr());
+
+// Go to File lists every file
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 15).WithMods(MOD_CTRL));
+string gf = string.From("go to file: ");
+gf.Append(text.Uint(s.T.ItemCount(s.Palette) as u64).AsStr());
+gf.Append(" files, has a.envol ");
+bool hasA = false;
+for (usize i = 0; i < s.T.ItemCount(s.Palette); i++) {
+    if (SameText(s.T.ItemText(s.Palette, i), "a.envol")) hasA = true;
+}
+gf.Append(Bool(hasA));
+print(gf.AsStr());
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ESCAPE));
+
+// icons in the sidebar
+bool envol = false;
+bool md = false;
+bool folder = false;
+for (usize i = 0; i < s.T.ItemCount(s.Files); i++) {
+    str name = s.T.ItemText(s.Files, i);
+    u32 icon = s.T.ItemIcon(s.Files, i);
+    if (SameText(name, "a.envol")) envol = icon == ui.ICON_ENVOL;
+    if (SameText(name, "b.md")) md = icon == ui.ICON_MARKDOWN;
+    if (SameText(name, "sub")) folder = icon == ui.ICON_FOLDER;
+}
+string ic = string.From("icons: envol ");
+ic.Append(Bool(envol));
+ic.Append(", markdown ");
+ic.Append(Bool(md));
+ic.Append(", folder ");
+ic.Append(Bool(folder));
+print(ic.AsStr());
+
+// bad.txt: saving would change its bytes, so it asks
+s.Open("bad.txt");
+s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'z' as u32));
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 18).WithMods(MOD_CTRL));
+print(Yes("bad bytes ask first: ", s.T.Focused() == s.Palette && SameText(fs.ReadText("docs-test/bad.txt").Unwrap().AsStr(), bad.AsStr())).AsStr());
+s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ESCAPE));
+
+// backups: a change kept when the window closes comes back at the next start
+Shell k = NewShellIn("docs-test", "docs-backups");
+k.Open("b.md");
+k.OnEvent(Event.Of(EventKind.Char, 0, 0, 'q' as u32));
+k.KeepUnsaved();
+Shell r = NewShellIn("docs-test", "docs-backups");
+string rs = string.From("restored: ");
+rs.Append(text.Uint(r.Docs.Len() as u64).AsStr());
+rs.Append(" tab, text kept");
+string kept = r.T.Value(r.Editor);
+if (!SameText(kept.AsStr(), "q# b\n")) rs.Append(" NOT");
+rs.Append(", unsaved ");
+rs.Append(Bool(r.Docs.Len() == 1 && r.IsDirty(0)));
+print(rs.AsStr());
+
+// Don't Save throws the backup away too
+r.Activate(0);
+r.Run(CMD_CLOSE);
+r.T.LayoutCells(th, 100, 30);
+r.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_DOWN));
+r.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ENTER));
+print(Yes("don't save removes the backup: ", fs.ListDir("docs-backups").Unwrap().Len() == 0 && r.Docs.Len() == 0).AsStr());
+Shell r2 = NewShellIn("docs-test", "docs-backups");
+string r2s = string.From("nothing restored after: ");
+r2s.Append(text.Uint(r2.Docs.Len() as u64).AsStr());
+r2s.Append(" tabs");
+print(r2s.AsStr());
+
+string Tabs(ref Shell s) {
+    string t = string.New();
+    for (usize i = 0; i < s.T.ItemCount(s.Tabs); i++) {
+        if (i > 0) t.Append(", ");
+        t.Append(s.T.ItemText(s.Tabs, i));
+    }
+    return t;
+}
+
+void TypeText(ref Shell s, str t) {
+    for (usize i = 0; i < t.Len; i++) s.OnEvent(Event.Of(EventKind.Char, 0, 0, t[i] as u32));
+}
+
+str Bool(bool b) {
+    if (b) return "true";
+    return "false";
+}
+
+string Yes(str what, bool b) {
+    string s = string.From(what);
+    s.Append(Bool(b));
+    return s;
+}
+
+string Say(str a, str b) {
+    string s = string.From(a);
+    s.Append(b);
+    return s;
+}

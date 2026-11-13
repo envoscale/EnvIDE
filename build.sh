@@ -37,9 +37,9 @@ toolchain() {
 }
 
 case "${1:-help}" in
-    build) toolchain; (cd "$ROOT" && "$ENVO" build) ;;
+    build) toolchain; (cd "$ROOT" && "$ENVO" build -O2) ;;
     test)  toolchain; (cd "$ROOT" && "$ENVO" test) ;;
-    run)   toolchain; (cd "$ROOT" && "$ENVO" build) && "$ROOT/build/envide$EXE" ;;
+    run)   toolchain; (cd "$ROOT" && "$ENVO" build -O2) && "$ROOT/build/envide$EXE" ;;
     *)
         say 'usage: ./build.sh <build|test|run>'
         [ "${1:-help}" = help ] || exit 2 ;;

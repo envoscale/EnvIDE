@@ -23,14 +23,28 @@ envide path/to/EnvoLang examples/03-generics/main.envol --screenshot light.ppm -
 
 ## What it does
 
-- A sidebar with the folder's files: folders first, names in order, build output left
-  out. Folders open and close; choosing a file opens it.
-- The editor: syntax colors, line numbers, multiple cursors, selections and undo.
-- A status bar with the file and the cursor's position, and a command palette
-  (Ctrl+Shift+P).
+- **Files:** New, Open File, Open Folder, Save, Save As, Save All, Revert, Close. A tab
+  with unsaved changes has a dot, and so does the window's title; EnvIDE asks before
+  closing it or quitting. Unsaved changes are copied to a backup every few seconds and
+  when the window closes, and the next start in the same folder brings them back.
+- **Tabs:** many files open at once, each with its own cursor and undo history; Ctrl+Tab
+  and Ctrl+Shift+Tab move between them.
+- **Menus:** File, Edit, View, Go and Help, with every shortcut shown, and a command
+  palette (Ctrl+Shift+P) that lists every command.
+- **Finding things:** Go to File (Ctrl+P) over the whole folder, Go to Line (Ctrl+G),
+  Find (Ctrl+F, then F3) and Replace (Ctrl+H).
+- **The sidebar:** the folder's files with icons by kind (the EnvoL mark for `.envol`,
+  `.envon` and `.eir`), folders first, build output left out. Ctrl+B hides it; its edge
+  drags.
+- **The editor:** syntax colors, line numbers, multiple cursors, toggle comment (Ctrl+/),
+  zoom (Ctrl+= and Ctrl+-), a light or dark theme.
+- **Files it should not open:** images, executables and other binary files are described
+  instead, and files over 64 MB are refused. Text with bytes that are not UTF-8 opens,
+  and EnvIDE asks before saving it.
 
-Next: saving, then diagnostics, completion and go-to-definition through `envo lsp`, then
-build, run, test and debug.
+What comes next is in the [roadmap](https://github.com/envoscale/EnvoScale/blob/main/envide/roadmap.md):
+completion and diagnostics through `envo lsp`, panels and split editors, a terminal,
+build, run and debug, and plugins.
 
 ## Use
 

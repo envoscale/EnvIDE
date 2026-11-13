@@ -4,10 +4,16 @@
 //   envide ... --one-frame               draw one frame in a window and quit (CI)
 //   envide ... --screenshot out.ppm      draw one frame without a window, into an image
 //              [--light] [--size 1280x800]
+//   envide ... --bench N                 time frames without a window: the first, then N each
+//                                        of redrawing, scrolling and typing (ms per frame)
+//   envide --stress N [folder]           N random events, each laid out and drawn in pixels,
+//                                        over a folder of hostile files made in folder
 use envor.gfx;
 use envor.font;
 use envor.theme;
-use ports.{EventKind};
+use ports.{Event, EventKind, KEY_PAGE_DOWN};
+use std.time;
+use alloc.text;
 use std.env;
 use std.fs;
 use platform;
@@ -15,6 +21,8 @@ use platform;
 bool oneFrame = false;
 bool light = false;
 str shot = "";
+u32 bench = 0;
+u32 stress = 0;
 str folder = "";
 str file = "";
 i32 width = 1280;
@@ -29,6 +37,12 @@ while (a < env.ArgCount()) {
     } else if (SameText(arg, "--screenshot") && a + 1 < env.ArgCount()) {
         a++;
         shot = env.Arg(a);
+    } else if (SameText(arg, "--bench") && a + 1 < env.ArgCount()) {
+        a++;
+        bench = Count(env.Arg(a));
+    } else if (SameText(arg, "--stress") && a + 1 < env.ArgCount()) {
+        a++;
+        stress = Count(env.Arg(a));
     } else if (SameText(arg, "--size") && a + 1 < env.ArgCount()) {
         a++;
         if (!ParseSize(env.Arg(a), ref width, ref height)) {
@@ -53,11 +67,29 @@ if (loaded.IsErr()) {
 font.Font f = loaded.Unwrap();
 theme.Theme th = theme.Dark();
 if (light) th = theme.Light();
-Shell s = NewShell(folder);
-if (file.Len > 0 && !s.Open(file)) {
-    print("envide: cannot read the file");
-    return 1;
+if (stress > 0) {
+    string root = string.From(folder);
+    if (folder.Len == 0 || SameText(folder, cwd.AsStr())) root = string.From("envide-stress");
+    MakeHostileFolder(root.AsStr());
+    Shell ss = NewShell(root.AsStr());
+    u64 seed = 0x9E3779B97F4A7C15;
+    i32 sw = width;
+    i32 sh = height;
+    gfx.Canvas sc = gfx.Canvas.New(sw, sh);
+    for (u32 i = 0; i < stress; i++) {
+        if (RandomStep(ref ss, ref seed, ref sw, ref sh, 18)) sc = gfx.Canvas.New(sw, sh);
+        ss.T.LayoutPixels(f, th, sw, sh);
+        ss.T.DrawPixels(ref sc, f, th);
+    }
+    string done = string.From("envide: survived ");
+    done.Append(text.Uint(stress as u64).AsStr());
+    done.Append(" random events");
+    print(done.AsStr());
+    return 0;
 }
+Shell s = NewShell(folder);
+if (light) s.Light = true;
+if (file.Len > 0) s.Open(file);
 
 if (shot.Len > 0) {
     gfx.Canvas shotCanvas = gfx.Canvas.New(width, height);
@@ -71,35 +103,141 @@ if (shot.Len > 0) {
     return 0;
 }
 
+if (bench > 0) {
+    if (file.Len == 0) s.NewFile();
+    gfx.Canvas bc = gfx.Canvas.New(width, height);
+    print(Timing("first frame", Frames(ref s, ref bc, f, th, width, height, 1, 0)).AsStr());
+    print(Timing("redraw", Frames(ref s, ref bc, f, th, width, height, bench, 0)).AsStr());
+    print(Timing("scroll", Frames(ref s, ref bc, f, th, width, height, bench, 1)).AsStr());
+    print(Timing("type", Frames(ref s, ref bc, f, th, width, height, bench, 2)).AsStr());
+    return 0;
+}
+
 var w = platform.Window();
 if (!w.Open("EnvIDE", width as u32, height as u32)) {
     print("EnvIDE needs a desktop: this system cannot open a window");
     return 1;
 }
+s.T.UseSystemClipboard(true);
 u32 ww = w.Width();
 u32 wh = w.Height();
 gfx.Canvas c = gfx.Canvas.New(ww as i32, wh as i32);
+u32 zoom = 100;
+bool lightNow = light;
+string title = string.New();
+// Every waiting event is handled before a frame is drawn, and a frame is drawn only when
+// something changed; with nothing to do, Wait sleeps until there is input (and unsaved
+// changes are copied to their backups now and then).
+bool dirty = true;
 while (w.IsOpen() && !s.Quit) {
-    var e = w.Poll();
+    Event e = Event.Nothing();
+    if (dirty) e = w.Poll();
+    else e = w.Wait(500);
     if (e.Is(EventKind.None)) {
+        if (!dirty) {
+            s.Backup(false);
+            continue;
+        }
+        if (s.Zoom != zoom || s.Light != lightNow) {
+            zoom = s.Zoom;
+            lightNow = s.Light;
+            th = Zoomed(lightNow, zoom);
+        }
+        string now = s.Title();
+        if (!SameText(now.AsStr(), title.AsStr())) {
+            w.SetTitle(now.AsStr());
+            title = now;
+        }
         s.T.LayoutPixels(f, th, ww as i32, wh as i32);
         s.T.DrawPixels(ref c, f, th);
         w.Present(c.Pixels(), ww, wh);
+        dirty = false;
         if (oneFrame) {
             print("envide: drew a frame");
             break;
         }
         continue;
     }
+    dirty = true;
     if (e.Is(EventKind.Resize)) {
         ww = w.Width();
         wh = w.Height();
-        c = gfx.Canvas.New(ww as i32, wh as i32);
+        if (ww > 0 && wh > 0) c = gfx.Canvas.New(ww as i32, wh as i32);
         continue;
     }
     s.OnEvent(e);
 }
+// closed with the window's close box: unsaved changes are kept for the next start
+if (!s.Quit) s.KeepUnsaved();
 if (w.IsOpen()) w.Close();
+
+// The theme at zoom percent: every size scaled.
+theme.Theme Zoomed(bool light, u32 zoom) {
+    theme.Theme t = theme.Dark();
+    if (light) t = theme.Light();
+    if (zoom == 100) return t;
+    t.Caption.Size = Pct(t.Caption.Size, zoom);
+    t.Caption.Line = Pct(t.Caption.Line, zoom);
+    t.Body.Size = Pct(t.Body.Size, zoom);
+    t.Body.Line = Pct(t.Body.Line, zoom);
+    t.Headline.Size = Pct(t.Headline.Size, zoom);
+    t.Headline.Line = Pct(t.Headline.Line, zoom);
+    t.Title.Size = Pct(t.Title.Size, zoom);
+    t.Title.Line = Pct(t.Title.Line, zoom);
+    t.LargeTitle.Size = Pct(t.LargeTitle.Size, zoom);
+    t.LargeTitle.Line = Pct(t.LargeTitle.Line, zoom);
+    t.Xs = Pct(t.Xs, zoom);
+    t.S = Pct(t.S, zoom);
+    t.M = Pct(t.M, zoom);
+    t.L = Pct(t.L, zoom);
+    t.Xl = Pct(t.Xl, zoom);
+    t.Xxl = Pct(t.Xxl, zoom);
+    t.RadiusSmall = Pct(t.RadiusSmall, zoom);
+    t.RadiusMedium = Pct(t.RadiusMedium, zoom);
+    t.RadiusLarge = Pct(t.RadiusLarge, zoom);
+    t.ControlHeight = Pct(t.ControlHeight, zoom);
+    return t;
+}
+
+u32 Pct(u32 v, u32 zoom) {
+    u32 r = (v * zoom + 50) / 100;
+    if (r == 0) r = 1;
+    return r;
+}
+
+// Draws n frames on c and returns their total time in nanoseconds. Between frames, mode 0
+// changes nothing, mode 1 pages down through the file, mode 2 types a character.
+u64 Frames(ref Shell s, ref gfx.Canvas c, in font.Font f, in theme.Theme th, i32 width, i32 height, u32 n, u32 mode) {
+    u64 start = time.MonoNanos();
+    for (u32 i = 0; i < n; i++) {
+        if (mode == 1) s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_PAGE_DOWN));
+        if (mode == 2) s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'x' as u32));
+        s.T.LayoutPixels(f, th, width, height);
+        s.T.DrawPixels(ref c, f, th);
+    }
+    return (time.MonoNanos() - start) / n as u64;
+}
+
+// "redraw: 3.2 ms per frame"
+string Timing(str what, u64 nanos) {
+    string out2 = string.From(what);
+    out2.Append(": ");
+    out2.Append(text.Uint(nanos / 1000000).AsStr());
+    out2.AppendByte('.');
+    out2.Append(text.Uint(nanos / 100000 % 10).AsStr());
+    out2.Append(" ms per frame");
+    return out2;
+}
+
+// A decimal count, 0 if s is not one.
+u32 Count(str s) {
+    u32 n = 0;
+    for (usize i = 0; i < s.Len; i++) {
+        if (s[i] < '0' || s[i] > '9' || n > 100000) return 0;
+        n = n * 10 + (s[i] - '0') as u32;
+    }
+    return n;
+}
 
 // "1280x800" into width and height.
 bool ParseSize(str s, ref i32 width, ref i32 height) {

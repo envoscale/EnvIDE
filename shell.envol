@@ -1,173 +1,1559 @@
-// The EnvIDE window: the folder's files in a sidebar (folders open and close), the editor
-// area with a tab for the open file, and a status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
-// window, a browser page or a terminal, and the tests drive it with events, no window.
+// The EnvIDE window: a menu bar, the folder's files in a sidebar, tabs over the editor,
+// and a status bar. The shell only builds and updates a ui.Tree, so the same code draws
+// into a window, a browser page or a terminal, and the tests drive it with events.
+//
+// Each tab is a document with its own buffer (text, cursor, history); the editor shows
+// one at a time. A document with unsaved changes has a dot on its tab and in the title,
+// and EnvIDE asks before closing it or quitting. Unsaved changes are also copied to a
+// backup now and then, and when the window is closed: the next start in the same folder
+// brings them back.
+//
+// The sidebar lists a folder when it is first opened, so a large tree costs nothing until
+// it is looked at. A file that is too large, or not text (an image, an executable, any
+// binary), is described instead of opened, and its tab is read-only. Text that is not
+// valid UTF-8 opens with U+FFFD in place of the bad bytes, and EnvIDE asks before saving
+// it that way.
 use envoui as ui;
 use envoui.edit;
-use ports.{Event, EventKind, KEY_A, MOD_CTRL, MOD_SHIFT};
+use ports.{Event, EventKind, KEY_A, KEY_0, KEY_F1, KEY_TAB, KEY_ENTER, KEY_ESCAPE, KEY_PAGE_UP, KEY_PAGE_DOWN, KEY_EQUAL, KEY_MINUS, KEY_SLASH, MOD_CTRL, MOD_SHIFT, MOD_ALT};
 use std.fs;
 use std.path;
+use std.env;
+use std.time;
 use alloc.text;
+use core.text as ct;
+
+const str VERSION = "0.3.0";
 
 const str KEYWORDS = "use namespace struct enum interface impl public private static const var if else for foreach while do break continue return match in ref out mut new true false null as is where unsafe this void bool str string u8 u16 u32 u64 usize i8 i16 i32 i64 isize f32 f64 List Map Option Result";
 
-// Folders the sidebar leaves out: build output and version control.
+// Folders the sidebar and Go to File leave out: build output and dependencies.
 const str SKIP = " build target node_modules ";
-const u32 MAX_DEPTH = 4;
 
-// The palette's commands, in the order they are listed.
-const str CMD_QUIT = "Quit";
+// The largest file EnvIDE opens: 64 MiB.
+const usize MAX_OPEN = 67108864;
+
+// The most files Go to File lists.
+const usize MAX_FILES = 20000;
+
+// The label of the stand-in child a folder has until it is listed.
+const str UNLISTED = "\u{2026}";
+
+// What a tab with unsaved changes ends with.
+const str DIRTY = " \u{25CF}";
+
+const usize NONE = 0xFFFFFFFFFFFFFFFF;
+
+// Commands: from the menu bar, the command palette and the keyboard.
+const u32 CMD_NONE = 0;
+const u32 CMD_NEW = 1;
+const u32 CMD_OPEN_FILE = 2;
+const u32 CMD_OPEN_FOLDER = 3;
+const u32 CMD_SAVE = 4;
+const u32 CMD_SAVE_AS = 5;
+const u32 CMD_SAVE_ALL = 6;
+const u32 CMD_REVERT = 7;
+const u32 CMD_CLOSE = 8;
+const u32 CMD_CLOSE_ALL = 9;
+const u32 CMD_QUIT = 10;
+const u32 CMD_UNDO = 11;
+const u32 CMD_REDO = 12;
+const u32 CMD_CUT = 13;
+const u32 CMD_COPY = 14;
+const u32 CMD_PASTE = 15;
+const u32 CMD_FIND = 16;
+const u32 CMD_FIND_NEXT = 17;
+const u32 CMD_REPLACE = 18;
+const u32 CMD_COMMENT = 19;
+const u32 CMD_SELECT_ALL = 20;
+const u32 CMD_NEXT_MATCH = 21;
+const u32 CMD_PALETTE = 22;
+const u32 CMD_SIDEBAR = 23;
+const u32 CMD_ZOOM_IN = 24;
+const u32 CMD_ZOOM_OUT = 25;
+const u32 CMD_ZOOM_RESET = 26;
+const u32 CMD_THEME = 27;
+const u32 CMD_GO_FILE = 28;
+const u32 CMD_GO_LINE = 29;
+const u32 CMD_NEXT_TAB = 30;
+const u32 CMD_PREV_TAB = 31;
+const u32 CMD_SHORTCUTS = 32;
+const u32 CMD_ABOUT = 33;
+
+// What the palette is showing.
+const u32 MODE_COMMANDS = 0;
+const u32 MODE_FILES = 1;
+const u32 MODE_PROMPT = 2;      // a line of text: Ask says what for
+const u32 MODE_CHOICE = 3;      // a few answers: Ask says to what
+
+const u32 ASK_GO_LINE = 1;
+const u32 ASK_FIND = 2;
+const u32 ASK_REPLACE_FIND = 3;
+const u32 ASK_REPLACE_WITH = 4;
+const u32 ASK_OPEN_FILE = 5;
+const u32 ASK_OPEN_FOLDER = 6;
+const u32 ASK_SAVE_AS = 7;
+const u32 ASK_CLOSE = 8;        // Save, Don't Save, Cancel for document Asked
+const u32 ASK_QUIT = 9;         // Save All and Quit, Quit Without Saving, Cancel
+const u32 ASK_REPLACE_FILE = 10;    // Replace, Cancel: Save As over another file
+const u32 ASK_LOSSY = 11;       // Save Anyway, Cancel: bytes that are not UTF-8
+const u32 ASK_CLOSE_ALL = 12;   // Save All and Close, Close Without Saving, Cancel
+
+// One row of the sidebar.
+struct Entry {
+    string Name;
+    string Path;        // "" for a stand-in
+    u32 Depth;
+    bool Dir;
+    bool Listed;        // a folder whose entries are in the sidebar
+}
+
+// One open document (a tab).
+struct Doc {
+    string Path;        // "" until it is saved
+    string Name;
+    u32 Buf;            // its buffer in the tree (ui.Tree.Document)
+    u64 Saved;          // the buffer's change count when it matched the file
+    u64 Backed;         // the change count last copied to the backup
+    bool IsText;        // false: the editor describes a file it did not open
+    bool Lossy;         // the file had bytes that are not UTF-8
+    string Note;        // why it was not opened
+    i32 Scroll;
+}
+
+impl Doc {
+    // A copy, sharing the buffer (Docs are rebuilt when one is closed).
+    Doc Copy(in this) => new Doc {
+        Path = string.From(this.Path.AsStr()), Name = string.From(this.Name.AsStr()), Buf = this.Buf, Saved = this.Saved,
+        Backed = this.Backed, IsText = this.IsText, Lossy = this.Lossy, Note = string.From(this.Note.AsStr()), Scroll = this.Scroll
+    };
+}
 
 struct Shell {
     ui.Tree T;
-    u32 Files;       // the sidebar
+    u32 Menu;
+    u32 Files;          // the sidebar
     u32 Tabs;
     u32 Editor;
-    u32 Status;      // the status bar's text
+    u32 Status;         // the status bar's text
     u32 Palette;
+    u32 Spare;          // the editor's document when no file is open
     string Folder;
-    string File;     // the open file, or empty
-    List<string> Paths;     // per sidebar item: its full path
-    List<bool> Dirs;        // per sidebar item: a folder?
-    bool Quit;       // the user chose Quit
+    List<Entry> Rows;   // the sidebar's items, in order
+    List<Doc> Docs;
+    usize Cur;          // the document shown, or NONE
+    u32 Untitled;       // how many new files were made
+    List<u32> MenuCmds; // the command of each menu item
+    List<u32> Cmds;     // every command, in palette order
+    List<string> CmdNames;
+    List<string> CmdKeys;
+    List<string> Found; // Go to File's files
+    u32 Mode;
+    u32 Ask;
+    usize Asked;        // the document a question is about
+    string Query;       // the last search
+    string Replacing;   // what Replace looks for
+    string Msg;         // what the status bar says until the next change
+    string BackupDir;   // "" if there is nowhere to keep backups
+    u64 LastBackup;
+    bool Quit;          // the user chose Quit
+    u32 Zoom;           // percent
+    bool Light;
 
-    // Opens file (a path, or one relative to the folder) in the editor, and shows it in
-    // the sidebar. False if it cannot be read.
+    // ---------------------------------------------------------------- documents
+
+    // Opens file (a path, or one relative to the folder) in a tab, or shows its tab if it
+    // is open. False if it is not a text file EnvIDE can show (the tab then says why).
     public bool Open(ref this, str file) {
         string full = string.From(file);
         if (!path.IsAbsolute(file)) {
             string inFolder = path.Join(this.Folder.AsStr(), file);
             if (fs.IsFile(inFolder.AsStr()) || !fs.IsFile(file)) full = inFolder;
         }
-        var r = fs.ReadText(full.AsStr());
-        if (r.IsErr()) return false;
-        string body = r.Unwrap();
-        this.T.SetValue(this.Editor, body.AsStr());
-        this.T.ClearItems(this.Tabs);
-        this.T.AddItem(this.Tabs, path.FileName(full.AsStr()), 0);
-        this.File = string.From(full.AsStr());
-        // the sidebar: its folders open, the file selected
-        for (usize i = 0; i < this.Paths.Len(); i++) {
-            if (this.Dirs.Get(i) && IsInside(full.AsStr(), this.Paths.AsSlice()[i].AsStr())) this.T.SetOpen(this.Files, i, true);
+        for (usize i = 0; i < this.Docs.Len(); i++) {
+            if (SameText(this.Docs.AsSlice()[i].Path.AsStr(), full.AsStr())) {
+                this.Activate(i);
+                return this.Docs.AsSlice()[i].IsText;
+            }
         }
-        for (usize i = 0; i < this.Paths.Len(); i++) {
-            if (SameText(this.Paths.AsSlice()[i].AsStr(), full.AsStr())) this.T.Select(this.Files, i);
+        string name = string.From(path.FileName(full.AsStr()));
+        Doc d = this.NewDoc(full.AsStr(), name.AsStr(), "");
+        string note = string.New();
+        string what = string.New();
+        if (fs.IsDir(full.AsStr())) {
+            note = string.From("folder");
+            what = string.From("is a folder.");
+        } else {
+            var r = fs.ReadPrefix(full.AsStr(), MAX_OPEN + 1);
+            if (r.IsErr()) {
+                note = string.From("cannot be read");
+                what = string.From("cannot be read (it may be missing, or not yours to read).");
+            } else {
+                string body = r.Unwrap();
+                if (body.Len() > MAX_OPEN) {
+                    note = string.From("too large");
+                    what = string.From("is larger than 64 MB, the most EnvIDE opens.");
+                } else {
+                    string kind = Kind(body.AsStr());
+                    if (kind.Len() > 0) {
+                        note = string.From("not text");
+                        what = string.From("is ");
+                        what.Append(kind.AsStr());
+                        what.Append(", not text: EnvIDE shows text files.");
+                    } else {
+                        d.Lossy = ct.Utf8ValidUpTo(body.AsStr()) != body.Len();
+                        unsafe { this.T.Document(d.Buf)[0].Load(str_from(body.AsStr().Ptr, body.Len())); }
+                        d.Saved = this.T.Document(d.Buf)[0].Changes();
+                        d.Backed = d.Saved;
+                    }
+                }
+            }
         }
-        this.T.SetFocus(this.Editor);
+        if (note.Len() > 0) {
+            string msg = string.From(name.AsStr());
+            msg.AppendByte(' ');
+            msg.Append(what.AsStr());
+            this.T.Document(d.Buf)[0].Load(msg.AsStr());
+            d.Saved = this.T.Document(d.Buf)[0].Changes();
+            d.Backed = d.Saved;
+            d.IsText = false;
+            d.Note = note;
+        }
+        bool ok = d.IsText;
+        this.Docs.Push(d);
+        this.Activate(this.Docs.Len() - 1);
+        this.Reveal(full.AsStr());
+        return ok;
+    }
+
+    // A new, empty document: "Untitled-1", "Untitled-2", ...
+    public void NewFile(ref this) {
+        this.Untitled++;
+        string name = string.From("Untitled-");
+        name.Append(text.Uint(this.Untitled as u64).AsStr());
+        Doc d = this.NewDoc("", name.AsStr(), "");
+        this.Docs.Push(d);
+        this.Activate(this.Docs.Len() - 1);
+    }
+
+    // Shows document i in the editor.
+    public void Activate(ref this, usize i) {
+        if (i >= this.Docs.Len()) return;
+        if (i != this.Cur) {
+            this.Stash();
+            this.Cur = i;
+            Doc[] ds = this.Docs.AsSlice();
+            this.T.ShowDocument(this.Editor, ds[i].Buf);
+            this.T.ScrollTo(this.Editor, ds[i].Scroll);
+        }
+        Doc[] ds2 = this.Docs.AsSlice();
+        this.T.SetEnabled(this.Editor, ds2[i].IsText);
+        this.T.SetGutter(this.Editor, ds2[i].IsText);
+        string lang = Language(ds2[i].Name.AsStr());
+        if (SameText(lang.AsStr(), "EnvoL")) this.T.SetSyntax(this.Editor, KEYWORDS, "//");
+        else this.T.SetSyntax(this.Editor, "", CommentOf(ds2[i].Name.AsStr()));
+        if (ds2[i].IsText) this.T.SetFocus(this.Editor);
+        else this.T.SetFocus(this.Files);
+        if (ds2[i].Path.Len() > 0) {
+            string p = string.From(ds2[i].Path.AsStr());
+            this.Reveal(p.AsStr());
+        }
+        this.RefreshTabs();
         this.UpdateStatus();
+    }
+
+    // Remembers where the shown document is scrolled to, before another is shown.
+    void Stash(ref this) {
+        if (this.Cur >= this.Docs.Len()) return;
+        mut Doc[] ds = this.Docs.AsMutSlice();
+        ds[this.Cur].Scroll = this.T.ScrollOf(this.Editor);
+        this.Cur = NONE;
+    }
+
+    // Closes document i without asking; another is shown, or the welcome text.
+    void Drop(ref this, usize i) {
+        if (i >= this.Docs.Len()) return;
+        this.DeleteBackup(i);
+        bool shown = i == this.Cur;
+        if (shown) {
+            this.Stash();
+            this.T.ShowDocument(this.Editor, this.Spare);
+        }
+        this.T.FreeDocument(this.Docs.AsSlice()[i].Buf);
+        List<Doc> rest = List<Doc>.New();
+        for (usize k = 0; k < this.Docs.Len(); k++) {
+            if (k != i) rest.Push(this.Docs.AsSlice()[k].Copy());
+        }
+        this.Docs = rest;
+        if (!shown) {
+            if (this.Cur != NONE && this.Cur > i) this.Cur--;
+            this.RefreshTabs();
+            return;
+        }
+        if (this.Docs.Len() == 0) {
+            this.Welcome();
+            return;
+        }
+        usize next = i;
+        if (next >= this.Docs.Len()) next = this.Docs.Len() - 1;
+        this.Activate(next);
+    }
+
+    // What the editor shows with nothing open.
+    void Welcome(ref this) {
+        this.Cur = NONE;
+        this.T.ShowDocument(this.Editor, this.Spare);
+        this.T.SetValue(this.Editor, "No file is open.\n\nCtrl+P opens a file from the folder, Ctrl+N makes a new one,\nand Ctrl+Shift+P lists every command.");
+        this.T.SetEnabled(this.Editor, false);
+        this.T.SetGutter(this.Editor, false);
+        this.T.SetSyntax(this.Editor, "", "");
+        this.T.SetFocus(this.Files);
+        this.RefreshTabs();
+        this.UpdateStatus();
+    }
+
+    // Asks before closing document i if it has unsaved changes.
+    public void Close(ref this, usize i) {
+        if (i >= this.Docs.Len()) return;
+        if (!this.IsDirty(i)) {
+            this.Drop(i);
+            return;
+        }
+        this.Activate(i);
+        string q = string.From(this.Docs.AsSlice()[i].Name.AsStr());
+        q.Append(" has unsaved changes");
+        this.Choose(ASK_CLOSE, i, q.AsStr(), "Save", "Don't Save", "Cancel");
+    }
+
+    // The change count of document i's buffer, wherever it is.
+    u64 ChangesOf(ref this, usize i) => this.T.Document(this.Docs.AsSlice()[i].Buf)[0].Changes();
+
+    public bool IsDirty(ref this, usize i) {
+        if (i >= this.Docs.Len() || !this.Docs.AsSlice()[i].IsText) return false;
+        return this.ChangesOf(i) != this.Docs.AsSlice()[i].Saved;
+    }
+
+    public bool AnyDirty(ref this) {
+        for (usize i = 0; i < this.Docs.Len(); i++) {
+            if (this.IsDirty(i)) return true;
+        }
+        return false;
+    }
+
+    // Document i's text, wherever its buffer is.
+    string TextOf(ref this, usize i) => this.T.Document(this.Docs.AsSlice()[i].Buf)[0].Text();
+
+    // Saves document i; one never saved asks where. False if it was not saved (yet).
+    public bool Save(ref this, usize i) {
+        if (i >= this.Docs.Len()) return false;
+        Doc[] ds = this.Docs.AsSlice();
+        if (!ds[i].IsText) {
+            this.Say("Nothing to save: this tab shows a file EnvIDE did not open");
+            return false;
+        }
+        if (ds[i].Path.Len() == 0) {
+            this.AskSaveAs(i);
+            return false;
+        }
+        if (ds[i].Lossy) {
+            string q = string.From(ds[i].Name.AsStr());
+            q.Append(" had bytes that are not UTF-8: saving writes U+FFFD in their place");
+            this.Choose(ASK_LOSSY, i, q.AsStr(), "Save Anyway", "Cancel", "");
+            return false;
+        }
+        return this.Write(i);
+    }
+
+    // Writes document i to its path.
+    bool Write(ref this, usize i) {
+        string body = this.TextOf(i);
+        string p = string.From(this.Docs.AsSlice()[i].Path.AsStr());
+        if (fs.WriteText(p.AsStr(), body.AsStr()).IsErr()) {
+            string m = string.From("Could not save ");
+            m.Append(p.AsStr());
+            m.Append(" (it may be read-only, or the folder may be gone)");
+            this.Say(m.AsStr());
+            return false;
+        }
+        u64 now = this.ChangesOf(i);
+        mut Doc[] ds = this.Docs.AsMutSlice();
+        ds[i].Saved = now;
+        ds[i].Backed = now;
+        ds[i].Lossy = false;
+        this.DeleteBackup(i);
+        string m = string.From("Saved ");
+        m.Append(ds[i].Name.AsStr());
+        this.Say(m.AsStr());
+        this.RefreshTabs();
         return true;
     }
 
-    // What the status bar says: the folder, or the open file (from the folder), and where
-    // the cursor is.
-    public string StatusText(ref this) {
-        edit.Pos p = this.T.Buffer(this.Editor)[0].Cursor();
-        string s = string.From(this.Folder.AsStr());
-        str file = this.File.AsStr();
+    // Saves every document with changes. False if one of them was not saved.
+    public bool SaveAll(ref this) {
+        for (usize i = 0; i < this.Docs.Len(); i++) {
+            if (!this.IsDirty(i)) continue;
+            if (!this.Save(i)) return false;
+        }
+        return true;
+    }
+
+    void AskSaveAs(ref this, usize i) {
+        Doc[] ds = this.Docs.AsSlice();
+        string start = string.From(ds[i].Path.AsStr());
+        if (start.Len() == 0) start = path.Join(this.Folder.AsStr(), ds[i].Name.AsStr());
+        this.Prompt(ASK_SAVE_AS, i, "Save As", start.AsStr());
+    }
+
+    // Saves document i as file p (a path, or one relative to the folder).
+    void SaveAs(ref this, usize i, str p, bool replace) {
+        if (i >= this.Docs.Len() || p.Len == 0) return;
+        string full = string.From(p);
+        if (!path.IsAbsolute(p)) full = path.Join(this.Folder.AsStr(), p);
+        if (fs.IsDir(full.AsStr())) {
+            this.Say("That is a folder: Save As needs a file name");
+            return;
+        }
+        bool same = SameText(full.AsStr(), this.Docs.AsSlice()[i].Path.AsStr());
+        if (!replace && !same && fs.IsFile(full.AsStr())) {
+            mut Doc[] ds0 = this.Docs.AsMutSlice();
+            ds0[i].Note = string.From(full.AsStr());    // where, until answered
+            string q = string.From(path.FileName(full.AsStr()));
+            q.Append(" already exists");
+            this.Choose(ASK_REPLACE_FILE, i, q.AsStr(), "Replace It", "Cancel", "");
+            return;
+        }
+        this.DeleteBackup(i);
+        string old = string.From(this.Docs.AsSlice()[i].Path.AsStr());
+        {
+            mut Doc[] ds = this.Docs.AsMutSlice();
+            ds[i].Path = string.From(full.AsStr());
+            ds[i].Name = string.From(path.FileName(full.AsStr()));
+            ds[i].Note = string.New();
+            ds[i].Lossy = false;
+        }
+        if (!this.Write(i)) {
+            mut Doc[] ds = this.Docs.AsMutSlice();
+            if (old.Len() > 0) ds[i].Name = string.From(path.FileName(old.AsStr()));
+            ds[i].Path = old;
+            return;
+        }
+        this.RefreshSidebar();
+        if (i == this.Cur) this.Activate(i);
+    }
+
+    // Reads document i from its file again, dropping its changes.
+    void Revert(ref this, usize i) {
+        if (i >= this.Docs.Len()) return;
+        string p = string.From(this.Docs.AsSlice()[i].Path.AsStr());
+        if (p.Len() == 0 || !this.Docs.AsSlice()[i].IsText) {
+            this.Say("Nothing to revert to: this file was never saved");
+            return;
+        }
+        var r = fs.ReadPrefix(p.AsStr(), MAX_OPEN + 1);
+        if (r.IsErr() || r.Unwrap().Len() > MAX_OPEN) {
+            this.Say("Could not read the file again");
+            return;
+        }
+        string body = fs.ReadPrefix(p.AsStr(), MAX_OPEN + 1).Unwrap();
+        this.DeleteBackup(i);
+        u32 buf = this.Docs.AsSlice()[i].Buf;
+        unsafe { this.T.Document(buf)[0].Load(str_from(body.AsStr().Ptr, body.Len())); }
+        u64 now = this.ChangesOf(i);
+        mut Doc[] ds = this.Docs.AsMutSlice();
+        ds[i].Saved = now;
+        ds[i].Backed = now;
+        ds[i].Lossy = ct.Utf8ValidUpTo(body.AsStr()) != body.Len();
+        this.Say("Reverted to the saved file");
+    }
+
+    // The tabs from Docs: names (with the folder when two match) and the unsaved dot.
+    void RefreshTabs(ref this) {
+        usize n = this.Docs.Len();
+        if (this.T.ItemCount(this.Tabs) != n) {
+            this.T.ClearItems(this.Tabs);
+            for (usize i = 0; i < n; i++) {
+                string label = this.TabLabel(i);
+                this.T.AddItem(this.Tabs, label.AsStr(), 0);
+            }
+        } else {
+            for (usize i = 0; i < n; i++) {
+                string label = this.TabLabel(i);
+                if (!SameText(this.T.ItemText(this.Tabs, i), label.AsStr())) this.T.SetItemText(this.Tabs, i, label.AsStr());
+            }
+        }
+        if (this.Cur < n) this.T.Select(this.Tabs, this.Cur);
+    }
+
+    string TabLabel(ref this, usize i) {
+        Doc[] ds = this.Docs.AsSlice();
+        string label = string.From(ds[i].Name.AsStr());
+        for (usize k = 0; k < ds.Len; k++) {
+            if (k == i || !SameText(ds[k].Name.AsStr(), ds[i].Name.AsStr()) || ds[i].Path.Len() == 0) continue;
+            label.Append(" - ");
+            label.Append(path.FileName(path.Parent(ds[i].Path.AsStr())));
+            break;
+        }
+        if (this.IsDirty(i)) label.Append(DIRTY);
+        return label;
+    }
+
+    // The window's title: the shown file, a dot if it has unsaved changes, the folder.
+    public string Title(ref this) {
+        string t = string.New();
+        if (this.Cur < this.Docs.Len()) {
+            if (this.IsDirty(this.Cur)) t.Append("\u{25CF} ");
+            t.Append(this.Docs.AsSlice()[this.Cur].Name.AsStr());
+            t.Append(" - ");
+        }
+        t.Append(path.FileName(this.Folder.AsStr()));
+        t.Append(" - EnvIDE");
+        return t;
+    }
+
+    // ---------------------------------------------------------------- backups
+
+    // Copies unsaved changes to the backup folder, at most every 2 seconds unless now.
+    public void Backup(ref this, bool now) {
+        if (this.BackupDir.Len() == 0) return;
+        u64 t = time.MonoNanos();
+        if (!now && t - this.LastBackup < 2000000000) return;
+        this.LastBackup = t;
+        for (usize i = 0; i < this.Docs.Len(); i++) {
+            u64 changes = this.ChangesOf(i);
+            if (!this.IsDirty(i)) continue;
+            if (changes == this.Docs.AsSlice()[i].Backed) continue;
+            string body = string.From("envide backup 1\n");
+            body.Append(this.Folder.AsStr());
+            body.AppendByte(10);
+            body.Append(this.Docs.AsSlice()[i].Path.AsStr());
+            body.AppendByte(10);
+            body.Append(this.Docs.AsSlice()[i].Name.AsStr());
+            body.AppendByte(10);
+            string content = this.TextOf(i);
+            body.Append(content.AsStr());
+            string file = this.BackupFile(i);
+            if (fs.WriteText(file.AsStr(), body.AsStr()).IsOk()) this.Docs.AsMutSlice()[i].Backed = changes;
+        }
+    }
+
+    // Keeps every unsaved change for the next start (the window is closing).
+    public void KeepUnsaved(ref this) => this.Backup(true);
+
+    string BackupFile(ref this, usize i) {
+        Doc[] ds = this.Docs.AsSlice();
+        string key = string.From(this.Folder.AsStr());
+        key.AppendByte(10);
+        if (ds[i].Path.Len() > 0) key.Append(ds[i].Path.AsStr());
+        else key.Append(ds[i].Name.AsStr());
+        string name = text.Hex(Fnv(key.AsStr()), 16);
+        name.Append(".backup");
+        return path.Join(this.BackupDir.AsStr(), name.AsStr());
+    }
+
+    void DeleteBackup(ref this, usize i) {
+        if (this.BackupDir.Len() == 0 || i >= this.Docs.Len()) return;
+        string file = this.BackupFile(i);
+        if (fs.IsFile(file.AsStr())) fs.Delete(file.AsStr());
+    }
+
+    // Opens the backups made for this folder, as documents with unsaved changes.
+    void Restore(ref this) {
+        if (this.BackupDir.Len() == 0) return;
+        var r = fs.ListDir(this.BackupDir.AsStr());
+        if (r.IsErr()) return;
+        List<string> names = r.Unwrap();
+        usize restored = 0;
+        foreach (var n in names.AsSlice()) {
+            string file = path.Join(this.BackupDir.AsStr(), n.AsStr());
+            var got = fs.ReadPrefix(file.AsStr(), MAX_OPEN + 4096);
+            if (got.IsErr()) continue;
+            string all = got.Unwrap();
+            str s = all.AsStr();
+            List<usize> ends = List<usize>.New();
+            for (usize k = 0; k < s.Len && ends.Len() < 4; k++) {
+                if (s[k] == 10) ends.Push(k);
+            }
+            if (ends.Len() < 4 || !SameText(s[0..ends.Get(0)], "envide backup 1")) continue;
+            str folder = s[ends.Get(0) + 1..ends.Get(1)];
+            if (!SameText(folder, this.Folder.AsStr())) continue;
+            str p = s[ends.Get(1) + 1..ends.Get(2)];
+            str name = s[ends.Get(2) + 1..ends.Get(3)];
+            str body = s[ends.Get(3) + 1..s.Len];
+            if (p.Len > 0) {
+                var disk = fs.ReadPrefix(p, MAX_OPEN + 1);
+                if (disk.IsOk() && SameText(disk.Unwrap().AsStr(), body)) {
+                    fs.Delete(file.AsStr());
+                    continue;
+                }
+            }
+            Doc d = this.NewDoc(p, name, body);
+            d.Saved = this.T.Document(d.Buf)[0].Changes() + 1;     // unsaved
+            if (p.Len == 0) {
+                this.Untitled++;
+            }
+            this.Docs.Push(d);
+            restored++;
+        }
+        if (restored == 0) return;
+        this.Activate(this.Docs.Len() - 1);
+        string m = string.From("Restored unsaved changes in ");
+        m.Append(text.Uint(restored as u64).AsStr());
+        if (restored == 1) m.Append(" file");
+        else m.Append(" files");
+        this.Say(m.AsStr());
+    }
+
+    // ---------------------------------------------------------------- the palette
+
+    // Opens the palette as a question with up to three answers.
+    void Choose(ref this, u32 ask, usize doc, str question, str a, str b, str c) {
+        this.T.ClearItems(this.Palette);
+        this.T.AddItem(this.Palette, a, 0);
+        if (b.Len > 0) this.T.AddItem(this.Palette, b, 0);
+        if (c.Len > 0) this.T.AddItem(this.Palette, c, 0);
+        this.T.OpenPalette(this.Palette);
+        this.T.SetText(this.Palette, question);
+        this.Mode = MODE_CHOICE;
+        this.Ask = ask;
+        this.Asked = doc;
+    }
+
+    // Opens the palette for a line of text, starting as start.
+    void Prompt(ref this, u32 ask, usize doc, str title, str start) {
+        this.T.OpenPrompt(this.Palette, title, start);
+        this.Mode = MODE_PROMPT;
+        this.Ask = ask;
+        this.Asked = doc;
+    }
+
+    void OpenCommands(ref this) {
+        this.T.ClearItems(this.Palette);
+        for (usize i = 0; i < this.Cmds.Len(); i++) {
+            string label = string.From(this.CmdNames.AsSlice()[i].AsStr());
+            str keys = this.CmdKeys.AsSlice()[i].AsStr();
+            if (keys.Len > 0) {
+                label.Append("  (");
+                label.Append(keys);
+                label.Append(")");
+            }
+            this.T.AddItem(this.Palette, label.AsStr(), 0);
+        }
+        this.T.OpenPalette(this.Palette);
+        this.Mode = MODE_COMMANDS;
+    }
+
+    // Go to File: every file in the folder (up to MAX_FILES), by path from the folder.
+    void OpenFiles(ref this) {
+        List<string> found = List<string>.New();
+        Walk(this.Folder.AsStr(), 0, ref found);
+        this.Found = found;
+        this.T.ClearItems(this.Palette);
+        usize skip = this.Folder.Len() + 1;
+        for (usize i = 0; i < this.Found.Len(); i++) {
+            str f = this.Found.AsSlice()[i].AsStr();
+            unsafe { this.T.AddItem(this.Palette, str_from(&f.Ptr[skip], f.Len - skip), 0); }
+            this.T.SetItemIcon(this.Palette, i, IconFor(f, false));
+        }
+        this.T.OpenPalette(this.Palette);
+        if (this.Found.Len() >= MAX_FILES) this.T.SetText(this.Palette, "the first 20000 files");
+        this.Mode = MODE_FILES;
+    }
+
+    // The palette answered: item (an index, or ui.PROMPT_ITEM for typed text).
+    void Answer(ref this, usize item) {
+        u32 mode = this.Mode;
+        u32 ask = this.Ask;
+        usize doc = this.Asked;
+        this.Mode = MODE_COMMANDS;
+        this.Ask = 0;
+        if (mode == MODE_COMMANDS) {
+            if (item < this.Cmds.Len()) this.Run(this.Cmds.Get(item));
+            return;
+        }
+        if (mode == MODE_FILES) {
+            if (item < this.Found.Len()) {
+                string f = string.From(this.Found.AsSlice()[item].AsStr());
+                this.Open(f.AsStr());
+            }
+            return;
+        }
+        if (mode == MODE_PROMPT) {
+            string answer = this.T.PaletteText(this.Palette);
+            this.Answered(ask, doc, Trimmed(answer.AsStr()));
+            return;
+        }
+        // a choice: item 0, 1 or 2
+        if (ask == ASK_CLOSE) {
+            if (item == 0 && this.Save(doc)) this.Drop(doc);
+            else if (item == 1) this.Drop(doc);
+        } else if (ask == ASK_QUIT) {
+            if (item == 0 && this.SaveAll()) this.Quit = true;
+            else if (item == 1) {
+                for (usize i = 0; i < this.Docs.Len(); i++) this.DeleteBackup(i);
+                this.Quit = true;
+            }
+        } else if (ask == ASK_CLOSE_ALL) {
+            if (item == 0 && !this.SaveAll()) return;
+            if (item == 0 || item == 1) {
+                while (this.Docs.Len() > 0) this.Drop(this.Docs.Len() - 1);
+            }
+        } else if (ask == ASK_REPLACE_FILE) {
+            string target = string.From(this.Docs.AsSlice()[doc].Note.AsStr());
+            this.Docs.AsMutSlice()[doc].Note = string.New();
+            if (item == 0) this.SaveAs(doc, target.AsStr(), true);
+        } else if (ask == ASK_LOSSY) {
+            if (item == 0) this.Write(doc);
+        }
+    }
+
+    void Answered(ref this, u32 ask, usize doc, str answer) {
+        if (ask == ASK_GO_LINE) {
+            usize line = Number(answer);
+            if (line == 0 || this.Cur >= this.Docs.Len()) {
+                this.Say("Go to Line takes a line number");
+                return;
+            }
+            mut edit.Buffer[] b = this.T.Buffer(this.Editor);
+            usize last = b[0].LineCount();
+            if (line > last) line = last;
+            b[0].SetCursor(edit.Pos.At(line - 1, 0));
+            this.T.RevealCursor(this.Editor);
+            this.T.SetFocus(this.Editor);
+        } else if (ask == ASK_FIND) {
+            this.Query = string.From(answer);
+            this.FindNext();
+        } else if (ask == ASK_REPLACE_FIND) {
+            if (answer.Len == 0) return;
+            this.Replacing = string.From(answer);
+            this.Prompt(ASK_REPLACE_WITH, doc, "Replace With", "");
+        } else if (ask == ASK_REPLACE_WITH) {
+            if (this.Cur >= this.Docs.Len() || !this.Docs.AsSlice()[this.Cur].IsText) return;
+            usize n = this.T.Buffer(this.Editor)[0].ReplaceAll(this.Replacing.AsStr(), answer, true);
+            string m = string.From("Replaced ");
+            m.Append(text.Uint(n as u64).AsStr());
+            if (n == 1) m.Append(" match");
+            else m.Append(" matches");
+            this.Say(m.AsStr());
+            this.T.SetFocus(this.Editor);
+        } else if (ask == ASK_OPEN_FILE) {
+            if (answer.Len == 0) return;
+            if (!this.Open(answer) && this.Cur < this.Docs.Len() && SameText(this.Docs.AsSlice()[this.Cur].Note.AsStr(), "cannot be read")) {
+                this.Drop(this.Cur);
+                string m = string.From("No file at ");
+                m.Append(answer);
+                this.Say(m.AsStr());
+            }
+        } else if (ask == ASK_OPEN_FOLDER) {
+            string full = string.From(answer);
+            if (!path.IsAbsolute(answer)) full = path.Join(this.Folder.AsStr(), answer);
+            if (!fs.IsDir(full.AsStr())) {
+                string m = string.From("No folder at ");
+                m.Append(full.AsStr());
+                this.Say(m.AsStr());
+                return;
+            }
+            this.Folder = Unslashed(full.AsStr());
+            this.Rows = Listing(this.Folder.AsStr(), 0);
+            List<string> none = List<string>.New();
+            this.Show(none, "");
+        } else if (ask == ASK_SAVE_AS) {
+            if (answer.Len == 0) return;
+            this.SaveAs(doc, answer, false);
+        }
+    }
+
+    // Selects the next match of the last search after the cursor (wrapping around).
+    void FindNext(ref this) {
+        if (this.Query.Len() == 0 || this.Cur >= this.Docs.Len()) return;
+        if (this.T.Buffer(this.Editor)[0].FindNext(this.Query.AsStr(), false)) {
+            this.T.RevealCursor(this.Editor);
+            this.T.SetFocus(this.Editor);
+        } else {
+            string m = string.From("No match for ");
+            m.Append(this.Query.AsStr());
+            this.Say(m.AsStr());
+        }
+    }
+
+    // ---------------------------------------------------------------- commands
+
+    public void Run(ref this, u32 cmd) {
+        usize cur = this.Cur;
+        bool has = cur < this.Docs.Len();
+        if (cmd == CMD_NEW) this.NewFile();
+        else if (cmd == CMD_OPEN_FILE) {
+            string start = string.From(this.Folder.AsStr());
+            start.AppendByte(Separator(this.Folder.AsStr()));
+            this.Prompt(ASK_OPEN_FILE, NONE, "Open File", start.AsStr());
+        } else if (cmd == CMD_OPEN_FOLDER) {
+            string f = string.From(this.Folder.AsStr());
+            this.Prompt(ASK_OPEN_FOLDER, NONE, "Open Folder", f.AsStr());
+        }
+        else if (cmd == CMD_SAVE && has) this.Save(cur);
+        else if (cmd == CMD_SAVE_AS && has && this.Docs.AsSlice()[cur].IsText) this.AskSaveAs(cur);
+        else if (cmd == CMD_SAVE_ALL) this.SaveAll();
+        else if (cmd == CMD_REVERT && has) this.Revert(cur);
+        else if (cmd == CMD_CLOSE && has) this.Close(cur);
+        else if (cmd == CMD_CLOSE_ALL) {
+            if (this.AnyDirty()) this.Choose(ASK_CLOSE_ALL, NONE, "Some files have unsaved changes", "Save All and Close", "Close Without Saving", "Cancel");
+            else while (this.Docs.Len() > 0) this.Drop(this.Docs.Len() - 1);
+        } else if (cmd == CMD_QUIT) {
+            if (this.AnyDirty()) this.Choose(ASK_QUIT, NONE, "Some files have unsaved changes", "Save All and Quit", "Quit Without Saving", "Cancel");
+            else this.Quit = true;
+        } else if (cmd == CMD_UNDO) this.EditorKey(KEY_A + 25, MOD_CTRL);
+        else if (cmd == CMD_REDO) this.EditorKey(KEY_A + 24, MOD_CTRL);
+        else if (cmd == CMD_CUT) this.EditorKey(KEY_A + 23, MOD_CTRL);
+        else if (cmd == CMD_COPY) this.EditorKey(KEY_A + 2, MOD_CTRL);
+        else if (cmd == CMD_PASTE) this.EditorKey(KEY_A + 21, MOD_CTRL);
+        else if (cmd == CMD_SELECT_ALL) this.EditorKey(KEY_A + 0, MOD_CTRL);
+        else if (cmd == CMD_NEXT_MATCH) this.EditorKey(KEY_A + 3, MOD_CTRL);
+        else if (cmd == CMD_FIND && has) {
+            string sel = this.T.Buffer(this.Editor)[0].Selected();
+            if (sel.Len() == 0 || HasNewline(sel.AsStr())) sel = string.From(this.Query.AsStr());
+            this.Prompt(ASK_FIND, cur, "Find", sel.AsStr());
+        } else if (cmd == CMD_FIND_NEXT) {
+            if (this.Query.Len() == 0) this.Run(CMD_FIND);
+            else this.FindNext();
+        } else if (cmd == CMD_REPLACE && has && this.Docs.AsSlice()[cur].IsText) {
+            string sel = this.T.Buffer(this.Editor)[0].Selected();
+            if (sel.Len() == 0 || HasNewline(sel.AsStr())) sel = string.From(this.Query.AsStr());
+            this.Prompt(ASK_REPLACE_FIND, cur, "Replace", sel.AsStr());
+        } else if (cmd == CMD_COMMENT && has && this.Docs.AsSlice()[cur].IsText) {
+            str prefix = CommentOf(this.Docs.AsSlice()[cur].Name.AsStr());
+            if (prefix.Len > 0) this.T.Buffer(this.Editor)[0].ToggleComment(prefix);
+        } else if (cmd == CMD_PALETTE || cmd == CMD_SHORTCUTS) this.OpenCommands();
+        else if (cmd == CMD_SIDEBAR) this.T.SetVisible(this.Files, !this.T.Visible(this.Files));
+        else if (cmd == CMD_ZOOM_IN && this.Zoom < 300) this.Zoom += 10;
+        else if (cmd == CMD_ZOOM_OUT && this.Zoom > 50) this.Zoom -= 10;
+        else if (cmd == CMD_ZOOM_RESET) this.Zoom = 100;
+        else if (cmd == CMD_THEME) this.Light = !this.Light;
+        else if (cmd == CMD_GO_FILE) this.OpenFiles();
+        else if (cmd == CMD_GO_LINE && has && this.Docs.AsSlice()[cur].IsText) {
+            string title = string.From("Go to Line (1 to ");
+            title.Append(text.Uint(this.T.Buffer(this.Editor)[0].LineCount() as u64).AsStr());
+            title.Append(")");
+            this.Prompt(ASK_GO_LINE, cur, title.AsStr(), "");
+        } else if (cmd == CMD_NEXT_TAB && this.Docs.Len() > 1) this.Activate((cur + 1) % this.Docs.Len());
+        else if (cmd == CMD_PREV_TAB && this.Docs.Len() > 1) this.Activate((cur + this.Docs.Len() - 1) % this.Docs.Len());
+        else if (cmd == CMD_ABOUT) {
+            string m = string.From("EnvIDE ");
+            m.Append(VERSION);
+            m.Append(", part of EnvoScale. Apache-2.0.");
+            this.Say(m.AsStr());
+        }
+    }
+
+    // Sends a key to the editor, as if it had been pressed there.
+    void EditorKey(ref this, u32 key, u32 mods) {
+        if (this.Cur >= this.Docs.Len()) return;
+        this.T.SetFocus(this.Editor);
+        this.T.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, key).WithMods(mods));
+    }
+
+    // The command a key press means, or CMD_NONE.
+    u32 Shortcut(in this, Event e) {
+        if (!e.Is(EventKind.KeyDown)) return CMD_NONE;
+        u32 k = e.Code();
+        bool ctrl = e.Ctrl();
+        bool shift = e.Shift();
+        bool alt = e.Alt();
+        if (k == KEY_F1 + 2 && !ctrl) return CMD_FIND_NEXT;
+        if (k == KEY_F1 && !ctrl) return CMD_SHORTCUTS;
+        if (!ctrl) return CMD_NONE;
+        if (k == KEY_TAB || k == KEY_PAGE_DOWN || k == KEY_PAGE_UP) {
+            if (shift || k == KEY_PAGE_UP) return CMD_PREV_TAB;
+            return CMD_NEXT_TAB;
+        }
+        if (k == KEY_EQUAL) return CMD_ZOOM_IN;
+        if (k == KEY_MINUS) return CMD_ZOOM_OUT;
+        if (k == KEY_0) return CMD_ZOOM_RESET;
+        if (k == KEY_SLASH) return CMD_COMMENT;
+        if (k < KEY_A || k > KEY_A + 25) return CMD_NONE;
+        u8 c = ('a' as u32 + k - KEY_A) as u8;
+        if (alt) {
+            if (c == 's') return CMD_SAVE_ALL;
+            return CMD_NONE;
+        }
+        if (shift) {
+            if (c == 'p') return CMD_PALETTE;
+            if (c == 's') return CMD_SAVE_AS;
+            return CMD_NONE;
+        }
+        if (c == 'n') return CMD_NEW;
+        if (c == 'o') return CMD_OPEN_FILE;
+        if (c == 's') return CMD_SAVE;
+        if (c == 'w') return CMD_CLOSE;
+        if (c == 'q') return CMD_QUIT;
+        if (c == 'f') return CMD_FIND;
+        if (c == 'h') return CMD_REPLACE;
+        if (c == 'p') return CMD_GO_FILE;
+        if (c == 'g') return CMD_GO_LINE;
+        if (c == 'b') return CMD_SIDEBAR;
+        return CMD_NONE;
+    }
+
+    // Handles one window event: shortcuts, then the component it is for.
+    public void OnEvent(ref this, Event e) {
+        if (e.Is(EventKind.KeyDown) || e.Is(EventKind.Char) || e.Is(EventKind.MouseDown)) this.Msg = string.New();
+        if (!this.T.MenuOpen()) {
+            u32 cmd = this.Shortcut(e);
+            if (cmd != CMD_NONE) {
+                if (this.Mode != MODE_COMMANDS && this.T.Focused() == this.Palette) {
+                    this.T.ClosePalette(this.Palette);
+                    this.Mode = MODE_COMMANDS;
+                }
+                this.Run(cmd);
+                this.RefreshTabs();
+                this.UpdateStatus();
+                return;
+            }
+        }
+        u32 id = this.T.OnEvent(e);
+        u32 act = this.T.Action();
+        if (id == this.Menu && act == ui.ACT_OPEN) {
+            usize item = this.T.Item();
+            if (item < this.MenuCmds.Len()) this.Run(this.MenuCmds.Get(item));
+        }
+        if (id == this.Palette && act == ui.ACT_OPEN) this.Answer(this.T.Item());
+        if (id == this.Palette && act == ui.ACT_CANCEL) {
+            this.Mode = MODE_COMMANDS;
+            this.Ask = 0;
+        }
+        if (id == this.Tabs && act == ui.ACT_SELECT) this.Activate(this.T.Item());
+        if (id == this.Tabs && act == ui.ACT_CLOSE) this.Close(this.T.Item());
+        if (id == this.Files && act == ui.ACT_TOGGLE) {
+            usize i = this.T.Item();
+            if (i < this.Rows.Len() && this.T.IsOpen(this.Files, i)) this.Expand(i);
+        }
+        if (id == this.Files && (act == ui.ACT_OPEN || act == ui.ACT_SELECT)) {
+            usize i = this.T.Item();
+            if (i < this.Rows.Len()) {
+                Entry[] rs = this.Rows.AsSlice();
+                if (!rs[i].Dir && rs[i].Path.Len() > 0) {
+                    string p = string.From(rs[i].Path.AsStr());
+                    this.Open(p.AsStr());
+                    // a click opens the file to edit; the arrow keys keep browsing the sidebar
+                    if (act == ui.ACT_SELECT && !e.Is(EventKind.MouseDown) && !e.Is(EventKind.MouseUp)) this.T.SetFocus(this.Files);
+                }
+            }
+        }
+        this.RefreshTabs();
+        this.UpdateStatus();
+    }
+
+    void Say(ref this, str m) {
+        this.Msg = string.From(m);
+        this.UpdateStatus();
+    }
+
+    // ---------------------------------------------------------------- the sidebar
+
+    // Lists and opens the folders on the way to p (inside the folder), and selects p.
+    void Reveal(ref this, str p) {
         str dir = this.Folder.AsStr();
-        if (file.Len > 0 && IsInside(file, dir)) s = string.From(file[dir.Len + 1..file.Len]);
-        else if (file.Len > 0) s = string.From(file);
+        if (!IsInside(p, dir)) return;
+        bool more = true;
+        while (more) {
+            more = false;
+            for (usize i = 0; i < this.Rows.Len(); i++) {
+                Entry[] rs = this.Rows.AsSlice();
+                if (!rs[i].Dir || !IsInside(p, rs[i].Path.AsStr())) continue;
+                if (!rs[i].Listed) {
+                    this.Expand(i);
+                    more = true;
+                    break;
+                }
+                this.T.SetOpen(this.Files, i, true);
+            }
+        }
+        for (usize i = 0; i < this.Rows.Len(); i++) {
+            if (SameText(this.Rows.AsSlice()[i].Path.AsStr(), p)) this.T.Select(this.Files, i);
+        }
+    }
+
+    // Lists folder row i into the sidebar in place of its stand-in, keeping which folders
+    // are open and which row is selected.
+    void Expand(ref this, usize i) {
+        Entry[] rs = this.Rows.AsSlice();
+        if (i >= rs.Len || !rs[i].Dir || rs[i].Listed) return;
+        string dir = string.From(rs[i].Path.AsStr());
+        u32 depth = rs[i].Depth + 1;
+        List<Entry> children = Listing(dir.AsStr(), depth);
+        List<string> open = this.OpenFolders();
+        open.Push(string.From(dir.AsStr()));
+        string selected = this.SelectedPath();
+        // the new rows: before i, i (now listed), its entries, then the rest without the stand-in
+        List<Entry> rows = List<Entry>.New();
+        usize n = this.Rows.Len();
+        usize skip = i + 1;
+        if (skip < n && this.Rows.AsSlice()[skip].Path.Len() == 0) skip++;
+        for (usize k = 0; k < n; k++) {
+            Entry e = CopyEntry(this.Rows.AsSlice()[k]);
+            if (k == i) e.Listed = true;
+            if (k > i && k < skip) continue;
+            rows.Push(e);
+            if (k == i) {
+                for (usize c = 0; c < children.Len(); c++) rows.Push(CopyEntry(children.AsSlice()[c]));
+            }
+        }
+        this.Rows = rows;
+        this.Show(open, selected.AsStr());
+    }
+
+    List<string> OpenFolders(ref this) {
+        List<string> open = List<string>.New();
+        Entry[] rs = this.Rows.AsSlice();
+        for (usize k = 0; k < rs.Len; k++) {
+            if (rs[k].Dir && this.T.IsOpen(this.Files, k)) open.Push(string.From(rs[k].Path.AsStr()));
+        }
+        return open;
+    }
+
+    string SelectedPath(ref this) {
+        usize sel = this.T.Selected(this.Files);
+        if (sel < this.Rows.Len()) return string.From(this.Rows.AsSlice()[sel].Path.AsStr());
+        return string.New();
+    }
+
+    // Lists the folder again (after a save made a file), keeping open folders open.
+    void RefreshSidebar(ref this) {
+        List<string> open = this.OpenFolders();
+        string selected = this.SelectedPath();
+        this.Rows = Listing(this.Folder.AsStr(), 0);
+        bool more = true;
+        while (more) {
+            more = false;
+            for (usize i = 0; i < this.Rows.Len(); i++) {
+                Entry[] rs = this.Rows.AsSlice();
+                if (!rs[i].Dir || rs[i].Listed || !Holds(open, rs[i].Path.AsStr())) continue;
+                // list it without showing yet
+                List<Entry> children = Listing(rs[i].Path.AsStr(), rs[i].Depth + 1);
+                List<Entry> rows = List<Entry>.New();
+                usize n = rs.Len;
+                usize skip = i + 1;
+                if (skip < n && rs[skip].Path.Len() == 0) skip++;
+                for (usize k = 0; k < n; k++) {
+                    Entry e = CopyEntry(this.Rows.AsSlice()[k]);
+                    if (k == i) e.Listed = true;
+                    if (k > i && k < skip) continue;
+                    rows.Push(e);
+                    if (k == i) {
+                        for (usize c = 0; c < children.Len(); c++) rows.Push(CopyEntry(children.AsSlice()[c]));
+                    }
+                }
+                this.Rows = rows;
+                more = true;
+                break;
+            }
+        }
+        this.Show(open, selected.AsStr());
+    }
+
+    // The sidebar's items from Rows, with the folders in open opened and selected selected.
+    void Show(ref this, in List<string> open, str selected) {
+        this.T.ClearItems(this.Files);
+        Entry[] rs = this.Rows.AsSlice();
+        for (usize k = 0; k < rs.Len; k++) {
+            this.T.AddItem(this.Files, rs[k].Name.AsStr(), rs[k].Depth);
+            if (rs[k].Path.Len() > 0) this.T.SetItemIcon(this.Files, k, IconFor(rs[k].Name.AsStr(), rs[k].Dir));
+        }
+        for (usize k = 0; k < rs.Len; k++) {
+            if (rs[k].Dir && Holds(open, rs[k].Path.AsStr())) this.T.SetOpen(this.Files, k, true);
+        }
+        for (usize k = 0; k < rs.Len; k++) {
+            if (selected.Len > 0 && SameText(rs[k].Path.AsStr(), selected)) this.T.Select(this.Files, k);
+        }
+    }
+
+    // ---------------------------------------------------------------- the status bar
+
+    // What the status bar says: the shown file (from the folder), where the cursor is, the
+    // line endings and language; or a message, or why a file was not opened.
+    public string StatusText(ref this) {
+        string s = string.New();
+        if (this.Cur < this.Docs.Len()) {
+            Doc[] ds = this.Docs.AsSlice();
+            str file = ds[this.Cur].Path.AsStr();
+            str dir = this.Folder.AsStr();
+            if (file.Len > 0 && IsInside(file, dir)) {
+                unsafe { s = string.From(str_from(&file.Ptr[dir.Len + 1], file.Len - dir.Len - 1)); }
+            } else if (file.Len > 0) {
+                s = string.From(file);
+            } else {
+                s = string.From(ds[this.Cur].Name.AsStr());
+            }
+        } else {
+            s = string.From(this.Folder.AsStr());
+        }
+        if (this.Msg.Len() > 0) {
+            s.Append("    ");
+            s.Append(this.Msg.AsStr());
+            return s;
+        }
+        if (this.Cur >= this.Docs.Len()) return s;
+        Doc[] ds = this.Docs.AsSlice();
+        if (!ds[this.Cur].IsText) {
+            s.Append("    ");
+            s.Append(ds[this.Cur].Note.AsStr());
+            return s;
+        }
+        edit.Pos p = this.T.Buffer(this.Editor)[0].Cursor();
         s.Append("    Ln ");
         s.Append(text.Int((p.Line + 1) as i64).AsStr());
         s.Append(", Col ");
         s.Append(text.Int((p.Col + 1) as i64).AsStr());
+        if (this.T.Buffer(this.Editor)[0].UsesCrlf()) s.Append("    CRLF");
+        else s.Append("    LF");
+        string lang = Language(ds[this.Cur].Name.AsStr());
+        s.Append("    ");
+        s.Append(lang.AsStr());
+        if (this.Zoom != 100) {
+            s.Append("    ");
+            s.Append(text.Uint(this.Zoom as u64).AsStr());
+            s.Append("%");
+        }
         return s;
     }
 
     public void UpdateStatus(ref this) {
         string s = this.StatusText();
-        this.T.SetText(this.Status, s.AsStr());
-    }
-
-    // Handles one window event: Ctrl+Shift+P opens the palette, everything else goes to
-    // the component it is for.
-    public void OnEvent(ref this, Event e) {
-        if (e.Is(EventKind.KeyDown) && e.Ctrl() && e.Shift() && e.Code() == KEY_A + 15) {
-            this.T.OpenPalette(this.Palette);
-            return;
-        }
-        u32 id = this.T.OnEvent(e);
-        if (id == this.Palette && this.T.Action() == ui.ACT_OPEN) {
-            if (SameText(this.T.ItemText(this.Palette, this.T.Item()), CMD_QUIT)) this.Quit = true;
-        }
-        if (id == this.Files && (this.T.Action() == ui.ACT_OPEN || this.T.Action() == ui.ACT_SELECT)) {
-            usize i = this.T.Item();
-            if (i < this.Paths.Len() && !this.Dirs.Get(i)) {
-                string p = string.From(this.Paths.AsSlice()[i].AsStr());
-                this.Open(p.AsStr());
-            }
-        }
-        this.UpdateStatus();
+        if (!SameText(this.T.Label(this.Status), s.AsStr())) this.T.SetText(this.Status, s.AsStr());
     }
 }
 
-// The shell for folder: its entries in the sidebar (folders first, hidden ones left
-// out), and an empty editor with the focus.
+
+// The shell for folder: a menu bar, its top level in the sidebar, and no file open
+// (unless backups of unsaved changes for this folder bring some back).
 Shell NewShell(str folder) {
+    string backups = BackupFolder();
+    return NewShellIn(folder, backups.AsStr());
+}
+
+// The same, keeping backups in the folder backups ("" for none).
+Shell NewShellIn(str folder, str backups) {
     ui.Tree t = ui.Tree.New();
+    u32 menu = t.MenuBar(t.Root());
     u32 body = t.Split(t.Root(), false);
     t.SetGrow(body, 1);
     t.SetRatio(body, 220);
     u32 files = t.TreeView(body);
     u32 area = t.Column(body);
     u32 tabs = t.Tabs(area, true);
-    t.AddItem(tabs, "untitled", 0);
     u32 ed = t.Editor(area, "");
     t.SetGrow(ed, 1);
-    t.SetSyntax(ed, KEYWORDS, "//");
     u32 bar = t.Row(t.Root());
     t.SetPadding(bar, ui.XS);
     u32 status = t.Text(bar, "", ui.CAPTION);
     u32 pal = t.Palette(t.Root());
-    t.AddItem(pal, CMD_QUIT, 0);
-    t.SetFocus(ed);
+    u32 spare = t.DocumentOf(ed);
     Shell s = new Shell {
-        T = t, Files = files, Tabs = tabs, Editor = ed, Status = status, Palette = pal, Folder = string.From(folder),
-        File = string.New(), Paths = List<string>.New(), Dirs = List<bool>.New(), Quit = false
+        T = t, Menu = menu, Files = files, Tabs = tabs, Editor = ed, Status = status, Palette = pal, Spare = spare,
+        Folder = Unslashed(folder), Rows = List<Entry>.New(), Docs = List<Doc>.New(), Cur = NONE, Untitled = 0,
+        MenuCmds = List<u32>.New(), Cmds = List<u32>.New(), CmdNames = List<string>.New(), CmdKeys = List<string>.New(),
+        Found = List<string>.New(), Mode = MODE_COMMANDS, Ask = 0, Asked = NONE, Query = string.New(),
+        Replacing = string.New(), Msg = string.New(), BackupDir = string.From(backups), LastBackup = 0, Quit = false,
+        Zoom = 100, Light = false
     };
-    s.T.ClearItems(files);
-    ListFolder(ref s, folder, 0);
+    s.Rows = Listing(s.Folder.AsStr(), 0);
+    s.Menus();
+    List<string> none = List<string>.New();
+    s.Show(none, "");
+    s.Welcome();
+    s.Restore();
     s.UpdateStatus();
     return s;
 }
 
-// Adds folder's entries to the sidebar at depth: folders first, then files, each in name
-// order; hidden entries and build output left out.
-void ListFolder(ref Shell s, str folder, u32 depth) {
-    var r = fs.ListDir(folder);
-    if (r.IsErr()) return;
-    List<string> listed = r.Unwrap();
-    List<string> names = SortNames(listed);
-    for (u32 pass = 0; pass < 2; pass++) {
-        for (usize i = 0; i < names.Len(); i++) {
-            str n = names.AsSlice()[i].AsStr();
-            if (n.Len == 0 || n[0] == '.') continue;
-            string full = path.Join(folder, n);
-            bool dir = fs.IsDir(full.AsStr());
-            if (dir != (pass == 0)) continue;
-            if (dir && Skipped(n)) continue;
-            s.T.AddItem(s.Files, n, depth);
-            s.Paths.Push(string.From(full.AsStr()));
-            s.Dirs.Push(dir);
-            if (dir && depth + 1 < MAX_DEPTH) ListFolder(ref s, full.AsStr(), depth + 1);
+impl Shell {
+    // A document named name at p ("" for a new one) holding body.
+    Doc NewDoc(ref this, str p, str name, str body) {
+        u32 b = this.T.NewDocument(body);
+        u64 c = this.T.Document(b)[0].Changes();
+        return new Doc {
+            Path = string.From(p), Name = string.From(name), Buf = b, Saved = c, Backed = c,
+            IsText = true, Lossy = false, Note = string.New(), Scroll = 0
+        };
+    }
+
+    // The menu bar and the command palette's list, from one table.
+    void Menus(ref this) {
+        this.MenuTitle("File");
+        this.MenuEntry("New File", "Ctrl+N", CMD_NEW);
+        this.MenuEntry("Open File...", "Ctrl+O", CMD_OPEN_FILE);
+        this.MenuEntry("Open Folder...", "", CMD_OPEN_FOLDER);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Save", "Ctrl+S", CMD_SAVE);
+        this.MenuEntry("Save As...", "Ctrl+Shift+S", CMD_SAVE_AS);
+        this.MenuEntry("Save All", "Ctrl+Alt+S", CMD_SAVE_ALL);
+        this.MenuEntry("Revert File", "", CMD_REVERT);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Close Tab", "Ctrl+W", CMD_CLOSE);
+        this.MenuEntry("Close All Tabs", "", CMD_CLOSE_ALL);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Quit", "Ctrl+Q", CMD_QUIT);
+        this.MenuTitle("Edit");
+        this.MenuEntry("Undo", "Ctrl+Z", CMD_UNDO);
+        this.MenuEntry("Redo", "Ctrl+Y", CMD_REDO);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Cut", "Ctrl+X", CMD_CUT);
+        this.MenuEntry("Copy", "Ctrl+C", CMD_COPY);
+        this.MenuEntry("Paste", "Ctrl+V", CMD_PASTE);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Find...", "Ctrl+F", CMD_FIND);
+        this.MenuEntry("Find Next", "F3", CMD_FIND_NEXT);
+        this.MenuEntry("Replace...", "Ctrl+H", CMD_REPLACE);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Toggle Comment", "Ctrl+/", CMD_COMMENT);
+        this.MenuEntry("Select All", "Ctrl+A", CMD_SELECT_ALL);
+        this.MenuEntry("Add Next Match", "Ctrl+D", CMD_NEXT_MATCH);
+        this.MenuTitle("View");
+        this.MenuEntry("Command Palette...", "Ctrl+Shift+P", CMD_PALETTE);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Side Bar", "Ctrl+B", CMD_SIDEBAR);
+        this.MenuEntry("Zoom In", "Ctrl+=", CMD_ZOOM_IN);
+        this.MenuEntry("Zoom Out", "Ctrl+-", CMD_ZOOM_OUT);
+        this.MenuEntry("Reset Zoom", "Ctrl+0", CMD_ZOOM_RESET);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Light or Dark Theme", "", CMD_THEME);
+        this.MenuTitle("Go");
+        this.MenuEntry("Go to File...", "Ctrl+P", CMD_GO_FILE);
+        this.MenuEntry("Go to Line...", "Ctrl+G", CMD_GO_LINE);
+        this.MenuEntry("-", "", CMD_NONE);
+        this.MenuEntry("Next Tab", "Ctrl+Tab", CMD_NEXT_TAB);
+        this.MenuEntry("Previous Tab", "Ctrl+Shift+Tab", CMD_PREV_TAB);
+        this.MenuTitle("Help");
+        this.MenuEntry("All Commands and Keys", "F1", CMD_SHORTCUTS);
+        this.MenuEntry("About EnvIDE", "", CMD_ABOUT);
+    }
+
+    void MenuTitle(ref this, str name) {
+        this.T.AddMenu(this.Menu, name);
+        this.MenuCmds.Push(CMD_NONE);
+    }
+
+    void MenuEntry(ref this, str name, str keys, u32 cmd) {
+        usize at = this.T.AddMenuItem(this.Menu, name, keys);
+        while (this.MenuCmds.Len() <= at) this.MenuCmds.Push(CMD_NONE);
+        this.MenuCmds.Set(at, cmd);
+        if (cmd == CMD_NONE || cmd == CMD_SHORTCUTS) return;
+        this.Cmds.Push(cmd);
+        string label = string.From(name);
+        if (label.Len() > 3 && SameText(label.AsStr()[label.Len() - 3..label.Len()], "...")) {
+            unsafe { label = string.From(str_from(label.AsStr().Ptr, label.Len() - 3)); }
         }
+        this.CmdNames.Push(label);
+        this.CmdKeys.Push(string.From(keys));
     }
 }
 
-// names in the order a file browser shows them: letters compare without case.
-List<string> SortNames(in List<string> names) {
-    List<string> sorted = List<string>.New();
-    List<bool> taken = List<bool>.New();
-    for (usize i = 0; i < names.Len(); i++) taken.Push(false);
-    for (usize k = 0; k < names.Len(); k++) {
-        usize best = names.Len();
-        for (usize i = 0; i < names.Len(); i++) {
-            if (taken.Get(i)) continue;
-            if (best == names.Len() || Before(names.AsSlice()[i].AsStr(), names.AsSlice()[best].AsStr())) best = i;
-        }
-        taken.Set(best, true);
-        sorted.Push(string.From(names.AsSlice()[best].AsStr()));
+// Where backups of unsaved changes go: a folder for EnvIDE in the user's local data, or
+// "" if there is none.
+string BackupFolder() {
+    string root = string.New();
+    string local = VarOr("LOCALAPPDATA");
+    string state = VarOr("XDG_STATE_HOME");
+    string home = VarOr("HOME");
+    if (local.Len() > 0) root = path.Join(local.AsStr(), "EnvIDE");
+    else if (state.Len() > 0) root = path.Join(state.AsStr(), "envide");
+    else if (home.Len() > 0) root = path.Join(home.AsStr(), ".local/state/envide");
+    else return string.New();
+    string dir = path.Join(root.AsStr(), "backup");
+    if (!fs.IsDir(dir.AsStr()) && fs.CreateDirAll(dir.AsStr()).IsErr()) return string.New();
+    return dir;
+}
+
+// An environment variable's value, or "".
+string VarOr(str name) {
+    string? v = env.Var(name);
+    if (v.IsSome()) return v.Unwrap();
+    return string.New();
+}
+
+// 64-bit FNV-1a of s.
+u64 Fnv(str s) {
+    u64 h = 0xCBF29CE484222325;
+    for (usize i = 0; i < s.Len; i++) {
+        h = (h ^ s[i] as u64) *% 0x100000001B3;
     }
-    return sorted;
+    return h;
+}
+
+// Adds the files under folder (depth levels down) to out, up to MAX_FILES, in sidebar order.
+void Walk(str folder, u32 depth, ref List<string> found) {
+    if (depth > 16 || found.Len() >= MAX_FILES) return;
+    List<Entry> rows = Listing(folder, depth);
+    foreach (var e in rows.AsSlice()) {
+        if (found.Len() >= MAX_FILES) return;
+        if (e.Path.Len() == 0) continue;
+        if (e.Dir) Walk(e.Path.AsStr(), depth + 1, ref found);
+        else found.Push(string.From(e.Path.AsStr()));
+    }
+}
+
+// The icon for a file or folder named name.
+u32 IconFor(str name, bool dir) {
+    if (dir) return ui.ICON_FOLDER;
+    string ext = LowerText(path.Extension(name));
+    str e = ext.AsStr();
+    if (e.Len > 0 && e[0] == '.') e = e[1..e.Len];
+    if (Among(e, "envol envon eir")) return ui.ICON_ENVOL;
+    if (Among(e, "md markdown")) return ui.ICON_MARKDOWN;
+    if (Among(e, "json jsonl")) return ui.ICON_JSON;
+    if (Among(e, "png jpg jpeg gif webp bmp ico svg")) return ui.ICON_IMAGE;
+    if (Among(e, "exe dll so dylib bin o obj a lib zip tar gz xz zst 7z pdf wasm ppm")) return ui.ICON_BINARY;
+    if (Among(e, "c h cc cpp hpp rs py js ts go java cs sh ps1 bat asm s html css")) return ui.ICON_CODE;
+    if (Among(e, "toml yml yaml ini cfg conf ref lock")) return ui.ICON_CONFIG;
+    string lower = LowerText(name);
+    if (Among(lower.AsStr(), "makefile dockerfile license notice .gitignore .gitattributes")) return ui.ICON_CONFIG;
+    return ui.ICON_FILE;
+}
+
+// The language of a file, by its name, for the status bar.
+string Language(str name) {
+    u32 icon = IconFor(name, false);
+    if (icon == ui.ICON_ENVOL) return string.From("EnvoL");
+    if (icon == ui.ICON_MARKDOWN) return string.From("Markdown");
+    if (icon == ui.ICON_JSON) return string.From("JSON");
+    string ext = LowerText(path.Extension(name));
+    str e = ext.AsStr();
+    if (e.Len > 0 && e[0] == '.') e = e[1..e.Len];
+    if (Among(e, "c h")) return string.From("C");
+    if (Among(e, "cc cpp hpp")) return string.From("C++");
+    if (Among(e, "rs")) return string.From("Rust");
+    if (Among(e, "py")) return string.From("Python");
+    if (Among(e, "js")) return string.From("JavaScript");
+    if (Among(e, "ts")) return string.From("TypeScript");
+    if (Among(e, "sh")) return string.From("Shell");
+    if (Among(e, "toml")) return string.From("TOML");
+    if (Among(e, "yml yaml")) return string.From("YAML");
+    if (Among(e, "html")) return string.From("HTML");
+    if (Among(e, "css")) return string.From("CSS");
+    return string.From("Plain Text");
+}
+
+// What starts a line comment in a file named name, or "".
+str CommentOf(str name) {
+    string ext = LowerText(path.Extension(name));
+    str e = ext.AsStr();
+    if (e.Len > 0 && e[0] == '.') e = e[1..e.Len];
+    if (Among(e, "envol envon eir c h cc cpp hpp rs js ts go java cs")) return "//";
+    if (Among(e, "py sh toml yml yaml ps1")) return "#";
+    if (Among(e, "asm s")) return ";";
+    return "";
+}
+
+// Is word one of the words in list (separated by spaces)?
+bool Among(str word, str list) {
+    if (word.Len == 0) return false;
+    usize i = 0;
+    while (i < list.Len) {
+        while (i < list.Len && list[i] == ' ') i++;
+        usize start = i;
+        while (i < list.Len && list[i] != ' ') i++;
+        if (i - start == word.Len && SameBytes(list, start, word)) return true;
+    }
+    return false;
+}
+
+string LowerText(str s) {
+    string out2 = string.New();
+    for (usize i = 0; i < s.Len; i++) out2.AppendByte(LowerByte(s[i]));
+    return out2;
+}
+
+bool Holds(in List<string> list, str s) {
+    foreach (var o in list.AsSlice()) {
+        if (SameText(o.AsStr(), s)) return true;
+    }
+    return false;
+}
+
+bool HasNewline(str s) {
+    for (usize i = 0; i < s.Len; i++) {
+        if (s[i] == 10) return true;
+    }
+    return false;
+}
+
+// s without spaces and tabs at either end.
+str Trimmed(str s) {
+    usize a = 0;
+    usize b = s.Len;
+    while (a < b && (s[a] == ' ' || s[a] == 9)) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == 9)) b--;
+    return s[a..b];
+}
+
+// p without separators at its end (unless it is only one).
+string Unslashed(str p) {
+    usize n = p.Len;
+    while (n > 1 && (p[n - 1] == '/' || p[n - 1] == 92)) n--;
+    return string.From(p[0..n]);
+}
+
+// The separator p uses: a backslash if it has one, else a slash.
+u8 Separator(str p) {
+    for (usize i = 0; i < p.Len; i++) {
+        if (p[i] == 92) return 92;
+    }
+    return '/';
+}
+
+// A decimal count, 0 if s is not one.
+usize Number(str s) {
+    usize n = 0;
+    if (s.Len == 0 || s.Len > 12) return 0;
+    for (usize i = 0; i < s.Len; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        n = n * 10 + (s[i] - '0') as usize;
+    }
+    return n;
+}
+
+// The rows for folder's entries at depth: folders first, then files, each in name order
+// without case; hidden entries and build output left out. A folder with anything in it
+// gets a stand-in child, so it shows as one that opens.
+List<Entry> Listing(str folder, u32 depth) {
+    List<Entry> rows = List<Entry>.New();
+    var r = fs.ListDir(folder);
+    if (r.IsErr()) return rows;
+    List<string> names = r.Unwrap();
+    List<usize> order = SortedOrder(names);
+    List<Entry> files = List<Entry>.New();
+    foreach (var k in order.AsSlice()) {
+        str n = names.AsSlice()[k].AsStr();
+        if (n.Len == 0 || n[0] == '.') continue;
+        string full = path.Join(folder, n);
+        bool dir = fs.IsDir(full.AsStr());
+        if (dir && Skipped(n)) continue;
+        Entry e = new Entry { Name = string.From(n), Path = full, Depth = depth, Dir = dir, Listed = false };
+        if (!dir) {
+            files.Push(e);
+            continue;
+        }
+        bool any = HasVisible(e.Path.AsStr());
+        rows.Push(e);
+        if (any) rows.Push(new Entry { Name = string.From(UNLISTED), Path = string.New(), Depth = depth + 1, Dir = false, Listed = false });
+    }
+    for (usize i = 0; i < files.Len(); i++) rows.Push(CopyEntry(files.AsSlice()[i]));
+    return rows;
+}
+
+// Does folder hold anything the sidebar would show?
+bool HasVisible(str folder) {
+    var r = fs.ListDir(folder);
+    if (r.IsErr()) return false;
+    foreach (var n in r.Unwrap().AsSlice()) {
+        if (n.Len() > 0 && n.AsStr()[0] != '.') return true;
+    }
+    return false;
+}
+
+Entry CopyEntry(in Entry e) => new Entry { Name = string.From(e.Name.AsStr()), Path = string.From(e.Path.AsStr()), Depth = e.Depth, Dir = e.Dir, Listed = e.Listed };
+
+// What kind of file data is, from its first bytes, if it is not text: "a PNG image
+// (1280 x 760)", "an executable", "binary data"; "" for text. Text has no NUL bytes and
+// little that is not UTF-8 in its first 8 KB.
+string Kind(str data) {
+    usize n = data.Len;
+    if (n >= 24 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G') {
+        string s = string.From("a PNG image (");
+        s.Append(text.Uint(Be32(data, 16) as u64).AsStr());
+        s.Append(" x ");
+        s.Append(text.Uint(Be32(data, 20) as u64).AsStr());
+        s.Append(")");
+        return s;
+    }
+    if (n >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return string.From("a JPEG image");
+    if (n >= 4 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F' && data[3] == '8') return string.From("a GIF image");
+    if (n >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F' && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P') return string.From("a WebP image");
+    if (n >= 2 && data[0] == 'B' && data[1] == 'M') return string.From("a BMP image");
+    if (n >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 1 && data[3] == 0) return string.From("an icon");
+    if (n >= 4 && data[0] == '%' && data[1] == 'P' && data[2] == 'D' && data[3] == 'F') return string.From("a PDF document");
+    if (n >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4) return string.From("a ZIP archive");
+    if (n >= 2 && data[0] == 'M' && data[1] == 'Z') return string.From("an executable");
+    if (n >= 4 && data[0] == 0x7F && data[1] == 'E' && data[2] == 'L' && data[3] == 'F') return string.From("an executable");
+    if (n >= 4 && data[0] == 0 && data[1] == 'a' && data[2] == 's' && data[3] == 'm') return string.From("a WebAssembly module");
+    // NUL bytes, or more than 1 byte in 4 that is not part of UTF-8 (text in an older
+    // encoding, like Latin-1, has fewer and opens, with a warning before it is saved)
+    usize look = n;
+    if (look > 8192) look = 8192;
+    usize bad = 0;
+    usize i = 0;
+    while (i < look) {
+        u8 c = data[i];
+        if (c == 0) return string.From("binary data");
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        usize len = Utf8Len(data, i);
+        if (len == 0) {
+            bad++;
+            i++;
+        } else {
+            i += len;
+        }
+    }
+    if (bad * 4 > look) return string.From("binary data");
+    return string.New();
+}
+
+// The length of the UTF-8 sequence at data[i], or 0 if it is not one.
+usize Utf8Len(str data, usize i) {
+    u8 c = data[i];
+    usize len = 0;
+    if (c >= 0xC2 && c <= 0xDF) len = 2;
+    else if (c >= 0xE0 && c <= 0xEF) len = 3;
+    else if (c >= 0xF0 && c <= 0xF4) len = 4;
+    else return 0;
+    if (i + len > data.Len) return 0;
+    for (usize k = 1; k < len; k++) {
+        if (data[i + k] & 0xC0 != 0x80) return 0;
+    }
+    return len;
+}
+
+u32 Be32(str d, usize at) => (d[at] as u32) << 24 | (d[at + 1] as u32) << 16 | (d[at + 2] as u32) << 8 | d[at + 3] as u32;
+
+// The order of names as a file browser shows them (letters compare without case): a
+// merge sort of their indexes.
+List<usize> SortedOrder(in List<string> names) {
+    List<usize> a = List<usize>.New();
+    List<usize> b = List<usize>.New();
+    for (usize i = 0; i < names.Len(); i++) {
+        a.Push(i);
+        b.Push(i);
+    }
+    string[] ns = names.AsSlice();
+    usize n = a.Len();
+    usize width = 1;
+    while (width < n) {
+        usize lo = 0;
+        while (lo < n) {
+            usize mid = lo + width;
+            if (mid > n) mid = n;
+            usize hi = lo + 2 * width;
+            if (hi > n) hi = n;
+            usize i = lo;
+            usize j = mid;
+            usize k = lo;
+            while (k < hi) {
+                if (i < mid && (j >= hi || !Before(ns[a.Get(j)].AsStr(), ns[a.Get(i)].AsStr()))) {
+                    b.Set(k, a.Get(i));
+                    i++;
+                } else {
+                    b.Set(k, a.Get(j));
+                    j++;
+                }
+                k++;
+            }
+            lo = hi;
+        }
+        for (usize k = 0; k < n; k++) a.Set(k, b.Get(k));
+        width = width * 2;
+    }
+    return a;
 }
 
 // Does a come before b, ignoring case (and by case where that is all they differ in)?
@@ -191,29 +1577,27 @@ u8 LowerByte(u8 c) {
     return c;
 }
 
-bool Skipped(str name) {
-    string padded = string.From(" ");
-    padded.Append(name);
-    padded.Append(" ");
-    str k = padded.AsStr();
-    str all = SKIP;
-    for (usize i = 0; i + k.Len <= all.Len; i++) {
-        if (SameText(all[i..i + k.Len], k)) return true;
-    }
-    return false;
+// Is name one of the folders in SKIP?
+bool Skipped(str name) => Among(name, SKIP);
+
+// Is p inside folder dir (a path that starts with dir and a separator)? Compares bytes,
+// so no slice can split a character.
+bool IsInside(str p, str dir) {
+    if (p.Len <= dir.Len + 1 || dir.Len == 0) return false;
+    if (!SameBytes(p, 0, dir)) return false;
+    return p[dir.Len] == '/' || p[dir.Len] == 92;
 }
 
-// Is p inside folder dir (a path that starts with dir and a separator)?
-bool IsInside(str p, str dir) {
-    if (p.Len <= dir.Len + 1) return false;
-    if (!SameText(p[0..dir.Len], dir)) return false;
-    return p[dir.Len] == '/' || p[dir.Len] == 92;
+// Does s hold t at byte at?
+bool SameBytes(str s, usize at, str t) {
+    if (at + t.Len > s.Len) return false;
+    for (usize i = 0; i < t.Len; i++) {
+        if (s[at + i] != t[i]) return false;
+    }
+    return true;
 }
 
 bool SameText(str a, str b) {
     if (a.Len != b.Len) return false;
-    for (usize i = 0; i < a.Len; i++) {
-        if (a[i] != b[i]) return false;
-    }
-    return true;
+    return SameBytes(a, 0, b);
 }

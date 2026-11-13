@@ -1,0 +1,30 @@
+// Thousands of random events against the shell (chaos.envol), laid out in terminal
+// cells at changing sizes, over a folder of hostile files. A panic anywhere fails the
+// test; the seed is fixed, so a failure repeats exactly. `envide --stress` does the same
+// in pixels, with a real font, drawing every frame.
+// expect: survived 6000 events
+// expect: still consistent: true
+use envor.theme;
+use alloc.text;
+
+MakeHostileFolder("stress-test");
+Shell s = NewShellIn("stress-test", "");
+theme.Theme th = theme.Dark();
+u64 seed = 0x9E3779B97F4A7C15;
+i32 cols = 100;
+i32 rows = 30;
+u32 events = 0;
+for (u32 i = 0; i < 6000; i++) {
+    RandomStep(ref s, ref seed, ref cols, ref rows, 1);
+    s.T.LayoutCells(th, cols, rows);
+    events++;
+}
+string done = string.From("survived ");
+done.Append(text.Uint(events as u64).AsStr());
+done.Append(" events");
+print(done.AsStr());
+// the cursor is still inside the buffer
+var b = s.T.Buffer(s.Editor);
+string c = string.From("still consistent: ");
+if (b[0].Cursor().Line < b[0].LineCount()) c.Append("true"); else c.Append("false");
+print(c.AsStr());

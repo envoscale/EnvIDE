@@ -1,10 +1,10 @@
 #eon 1
 package {
     name    = "envide"
-    version = "0.1.0"
+    version = "0.3.0"
     edition = "2027"
 }
 dependencies {
-    envoui = { git = "https://github.com/envoscale/Envoui", rev = "076a32b5da081d083eee771bae03077d78645318" }
-    envor  = { git = "https://github.com/envoscale/Envor", rev = "596ea4c3fbd47bb2a3967780b9da33544a4e9dd5" }
+    envoui = { git = "https://github.com/envoscale/EnvoUI", rev = "0ee45d0180465ad07af5e4146370cc6e3d2b5ec1" }
+    envor  = { git = "https://github.com/envoscale/EnvoR", rev = "14884253964dbef4d517e33990eb04e5658dc9d7" }
 }

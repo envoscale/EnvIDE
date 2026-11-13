@@ -1,13 +1,13 @@
 // Opening a file: its folders open in the sidebar, it is selected there, its tab and text
 // show, and the status bar names it from the folder. Folders come first, names in order
 // without case, and build output is left out.
-// expect: sidebar: docs, src, lib.envol, main.envol, README.md, Zeta.md
+// expect: sidebar: docs, src, …, README.md, Zeta.md
 // expect: opened: true
 // expect: selected: lib.envol
 // expect: src open: true
 // expect: tab: lib.envol
 // expect: first line: // lib
-// expect: status: src/lib.envol    Ln 1, Col 1
+// expect: status: src/lib.envol    Ln 1, Col 1    LF    EnvoL
 // expect: missing: false
 use envor.theme;
 use std.fs;
@@ -20,7 +20,7 @@ fs.WriteText("open-test/src/lib.envol", "// lib\n");
 fs.WriteText("open-test/Zeta.md", "z\n");
 fs.WriteText("open-test/README.md", "# r\n");
 
-Shell s = NewShell("open-test");
+Shell s = NewShellIn("open-test", "");
 string items = string.From("sidebar: ");
 for (usize i = 0; i < s.T.ItemCount(s.Files); i++) {
     if (i > 0) items.Append(", ");

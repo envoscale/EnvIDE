@@ -1,0 +1,149 @@
+// Random input for stress testing (tests/stress.envol, and `envide --stress`): a folder
+// of hostile files, and one random event at a time from a seed, so a failure repeats.
+use ports.{Event, EventKind, KEY_A, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESCAPE, KEY_HOME, KEY_LEFT, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_CTRL, MOD_SHIFT};
+use std.fs;
+use alloc.text;
+
+// Fills dir with files that have broken editors before: empty, CRLF, invalid UTF-8,
+// NUL bytes, an image header, a 20,000-character line, sixty files, deep folders.
+void MakeHostileFolder(str dir) {
+    string d = string.From(dir);
+    fs.CreateDirAll(Under(d, "src/deep/a/b/c").AsStr());
+    fs.CreateDirAll(Under(d, "many").AsStr());
+    fs.CreateDirAll(Under(d, "empty").AsStr());
+    fs.WriteText(Under(d, "empty.txt").AsStr(), "");
+    fs.WriteText(Under(d, "crlf.txt").AsStr(), "one\r\ntwo\r\n\tthree\r\n");
+    fs.WriteText(Under(d, "src/main.envol").AsStr(), "print(\"hi\");\n// caf\u{e9} \u{1f600}\n\tindented\n");
+    fs.WriteText(Under(d, "src/deep/a/b/c/leaf.txt").AsStr(), "leaf\n");
+    string bad = string.From("ok\n");
+    bad.AppendByte(0xFF);
+    bad.AppendByte(0xC3);
+    bad.AppendByte(10);
+    bad.AppendByte(0x80);
+    bad.Append("tail\n");
+    fs.WriteText(Under(d, "bad.txt").AsStr(), bad.AsStr());
+    string nul = string.New();
+    for (u32 i = 0; i < 300; i++) nul.AppendByte((i % 256) as u8);
+    fs.WriteText(Under(d, "nul.bin").AsStr(), nul.AsStr());
+    string png = string.New();
+    png.AppendByte(0x89);
+    png.Append("PNG\r\n");
+    png.AppendByte(0x1A);
+    png.AppendByte(10);
+    for (u32 i = 0; i < 64; i++) png.AppendByte((i * 37 % 256) as u8);
+    fs.WriteText(Under(d, "image.png").AsStr(), png.AsStr());
+    string long = string.New();
+    for (u32 i = 0; i < 20000; i++) long.AppendByte('a' + (i % 26) as u8);
+    fs.WriteText(Under(d, "long.txt").AsStr(), long.AsStr());
+    for (u32 i = 0; i < 60; i++) {
+        string p = string.From("many/f");
+        p.Append(text.Uint(i as u64).AsStr());
+        p.Append(".txt");
+        fs.WriteText(Under(d, p.AsStr()).AsStr(), "x\n");
+    }
+}
+
+string Under(in string dir, str rel) {
+    string p = string.From(dir.AsStr());
+    p.AppendByte('/');
+    p.Append(rel);
+    return p;
+}
+
+// The next random number (xorshift64).
+u64 NextRandom(u64 x) {
+    u64 v = x ^ (x << 13);
+    v = v ^ (v >> 7);
+    return v ^ (v << 17);
+}
+
+// One random thing a user could do, from seed: open a file (some missing, binary or a
+// folder), press keys with and without modifiers, type (with accents, emoji and new
+// lines), click, drag and scroll anywhere (and outside), use the palette. Returns true
+// when it asks for a new layout size, written to width and height (sometimes tiny), in
+// units of scale (1 for cells, the line height for pixels).
+bool RandomStep(ref Shell s, ref u64 seed, ref i32 width, ref i32 height, i32 scale) {
+    seed = NextRandom(seed);
+    u64 r = seed >> 33;
+    u32 what = (r % 100) as u32;
+    if (what < 3) {
+        width = (((NextRandom(seed) >> 40) % 140) as i32 + 1) * scale;
+        height = (((NextRandom(seed) >> 20) % 50) as i32 + 1) * scale;
+        if (r % 7 == 0) {
+            width = scale;
+            height = scale;
+        }
+        return true;
+    }
+    if (what < 8) {
+        u64 k = (r >> 8) % 11;
+        str f = "empty.txt";
+        if (k == 1) f = "crlf.txt";
+        if (k == 2) f = "src/main.envol";
+        if (k == 3) f = "bad.txt";
+        if (k == 4) f = "nul.bin";
+        if (k == 5) f = "image.png";
+        if (k == 6) f = "long.txt";
+        if (k == 7) f = "nope.txt";
+        if (k == 8) f = "src";
+        if (k == 9) f = "src/deep/a/b/c/leaf.txt";
+        if (k == 10) f = "many/f7.txt";
+        s.Open(f);
+        return false;
+    }
+    if (what < 35) {
+        u64 k = (r >> 8) % 13;
+        u32 key = KEY_UP;
+        if (k == 1) key = KEY_DOWN;
+        if (k == 2) key = KEY_LEFT;
+        if (k == 3) key = KEY_RIGHT;
+        if (k == 4) key = KEY_HOME;
+        if (k == 5) key = KEY_END;
+        if (k == 6) key = KEY_PAGE_UP;
+        if (k == 7) key = KEY_PAGE_DOWN;
+        if (k == 8) key = KEY_BACKSPACE;
+        if (k == 9) key = KEY_DELETE;
+        if (k == 10) key = KEY_ENTER;
+        if (k == 11) key = KEY_TAB;
+        if (k == 12) key = KEY_ESCAPE;
+        u32 mods = 0;
+        if ((r >> 16) % 3 == 0) mods = mods | MOD_SHIFT;
+        if ((r >> 18) % 5 == 0) mods = mods | MOD_CTRL;
+        s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, key).WithMods(mods));
+        return false;
+    }
+    if (what < 40) {
+        // Ctrl with a letter: select all, copy, cut, paste, undo, redo, and the rest
+        s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + ((r >> 8) % 26) as u32).WithMods(MOD_CTRL | ((r >> 20) % 2) as u32));
+        return false;
+    }
+    if (what < 65) {
+        u32 ch = ('a' as u32) + ((r >> 8) % 26) as u32;
+        if ((r >> 13) % 9 == 0) ch = 0xE9;
+        if ((r >> 13) % 17 == 0) ch = 0x1F600;
+        if ((r >> 13) % 23 == 0) ch = 10;
+        s.OnEvent(Event.Of(EventKind.Char, 0, 0, ch));
+        return false;
+    }
+    if (what < 85) {
+        i32 x = ((r >> 8) % 160) as i32 * scale / 1 - 10 * scale;
+        i32 y = ((r >> 20) % 60) as i32 * scale - 5 * scale;
+        if (scale > 1) x = ((r >> 8) % 1600) as i32 - 100;
+        EventKind k = EventKind.MouseDown;
+        if ((r >> 30) % 3 == 0) k = EventKind.MouseUp;
+        if ((r >> 30) % 3 == 1) k = EventKind.MouseMove;
+        s.OnEvent(Event.Of(k, x, y, 1));
+        return false;
+    }
+    if (what < 92) {
+        i32 d = 120;
+        if ((r >> 8) % 2 == 0) d = -120;
+        s.OnEvent(Event.Of(EventKind.Wheel, ((r >> 9) % 120) as i32 * scale, ((r >> 20) % 40) as i32 * scale, d as u32));
+        return false;
+    }
+    // the palette, and typing into it
+    s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_A + 15).WithMods(MOD_CTRL | MOD_SHIFT));
+    s.OnEvent(Event.Of(EventKind.Char, 0, 0, 'z' as u32));
+    s.OnEvent(Event.Of(EventKind.KeyDown, 0, 0, KEY_ESCAPE));
+    return false;
+}
