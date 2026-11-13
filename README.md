@@ -56,4 +56,4 @@ adapters there, never code here.
 
 ## License
 
-Same as EnvoLang: see [LICENSE](LICENSE).
+Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
