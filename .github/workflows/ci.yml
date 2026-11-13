@@ -68,4 +68,4 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "EnvIDE $GITHUB_REF_NAME" --notes "The EnvIDE shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envolang.ref."
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "EnvIDE $GITHUB_REF_NAME" --notes "EnvIDE, a code editor written in EnvoL, for Linux and Windows. Run it with a folder, and a file to open: envide <folder> [file]. A sidebar with the folder's tree, tabs, the editor with syntax colors, a status bar and a command palette (Ctrl+Shift+P); --screenshot draws a frame into an image. Built with EnvoLang at the commit in envolang.ref. Apache-2.0."
