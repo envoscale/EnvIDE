@@ -1,13 +1,50 @@
 // Envide in a window: the shell (shell.envol), drawn each time nothing is waiting.
-// `envide --one-frame` draws one frame and quits, for CI.
+//
+//   envide [folder] [file]               open folder (default: the current one), and file in it
+//   envide ... --one-frame               draw one frame in a window and quit (CI)
+//   envide ... --screenshot out.ppm      draw one frame without a window, into an image
+//              [--light] [--size 1280x800]
 use envor.gfx;
 use envor.font;
 use envor.theme;
 use ports.{EventKind};
 use std.env;
+use std.fs;
 use platform;
 
-bool oneFrame = env.ArgCount() > 1 && SameText(env.Arg(1), "--one-frame");
+bool oneFrame = false;
+bool light = false;
+str shot = "";
+str folder = "";
+str file = "";
+i32 width = 1280;
+i32 height = 800;
+usize a = 1;
+while (a < env.ArgCount()) {
+    str arg = env.Arg(a);
+    if (SameText(arg, "--one-frame")) {
+        oneFrame = true;
+    } else if (SameText(arg, "--light")) {
+        light = true;
+    } else if (SameText(arg, "--screenshot") && a + 1 < env.ArgCount()) {
+        a++;
+        shot = env.Arg(a);
+    } else if (SameText(arg, "--size") && a + 1 < env.ArgCount()) {
+        a++;
+        if (!ParseSize(env.Arg(a), ref width, ref height)) {
+            print("envide: --size takes WIDTHxHEIGHT, like 1280x800");
+            return 2;
+        }
+    } else if (folder.Len == 0) {
+        folder = arg;
+    } else {
+        file = arg;
+    }
+    a++;
+}
+string cwd = env.CurrentDir();
+if (folder.Len == 0) folder = cwd.AsStr();
+
 var loaded = font.System("monospace");
 if (loaded.IsErr()) {
     print("Envide needs a monospace font, and this system has none it knows");
@@ -15,22 +52,39 @@ if (loaded.IsErr()) {
 }
 font.Font f = loaded.Unwrap();
 theme.Theme th = theme.Dark();
-Shell s = NewShell(env.CurrentDir().AsStr());
+if (light) th = theme.Light();
+Shell s = NewShell(folder);
+if (file.Len > 0 && !s.Open(file)) {
+    print("envide: cannot read the file");
+    return 1;
+}
+
+if (shot.Len > 0) {
+    gfx.Canvas shotCanvas = gfx.Canvas.New(width, height);
+    s.T.LayoutPixels(f, th, width, height);
+    s.T.DrawPixels(ref shotCanvas, f, th);
+    string ppm = shotCanvas.Ppm();
+    if (fs.WriteText(shot, ppm.AsStr()).IsErr()) {
+        print("envide: cannot write the screenshot");
+        return 1;
+    }
+    return 0;
+}
 
 var w = platform.Window();
-if (!w.Open("Envide", 1100, 700)) {
+if (!w.Open("Envide", width as u32, height as u32)) {
     print("Envide needs a desktop: this system cannot open a window");
     return 1;
 }
-u32 width = w.Width();
-u32 height = w.Height();
-gfx.Canvas c = gfx.Canvas.New(width as i32, height as i32);
+u32 ww = w.Width();
+u32 wh = w.Height();
+gfx.Canvas c = gfx.Canvas.New(ww as i32, wh as i32);
 while (w.IsOpen() && !s.Quit) {
     var e = w.Poll();
     if (e.Is(EventKind.None)) {
-        s.T.LayoutPixels(f, th, width as i32, height as i32);
+        s.T.LayoutPixels(f, th, ww as i32, wh as i32);
         s.T.DrawPixels(ref c, f, th);
-        w.Present(c.Pixels(), width, height);
+        w.Present(c.Pixels(), ww, wh);
         if (oneFrame) {
             print("envide: drew a frame");
             break;
@@ -38,11 +92,35 @@ while (w.IsOpen() && !s.Quit) {
         continue;
     }
     if (e.Is(EventKind.Resize)) {
-        width = w.Width();
-        height = w.Height();
-        c = gfx.Canvas.New(width as i32, height as i32);
+        ww = w.Width();
+        wh = w.Height();
+        c = gfx.Canvas.New(ww as i32, wh as i32);
         continue;
     }
     s.OnEvent(e);
 }
 if (w.IsOpen()) w.Close();
+
+// "1280x800" into width and height.
+bool ParseSize(str s, ref i32 width, ref i32 height) {
+    i32 n = 0;
+    i32 first = -1;
+    usize digits = 0;
+    for (usize i = 0; i < s.Len; i++) {
+        u8 ch = s[i];
+        if (ch == 'x' && first < 0 && digits > 0) {
+            first = n;
+            n = 0;
+            digits = 0;
+        } else if (ch >= '0' && ch <= '9' && n < 100000) {
+            n = n * 10 + (ch - '0') as i32;
+            digits++;
+        } else {
+            return false;
+        }
+    }
+    if (first <= 0 || n <= 0 || digits == 0) return false;
+    width = first;
+    height = n;
+    return true;
+}

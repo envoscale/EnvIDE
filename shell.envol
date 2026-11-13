@@ -1,5 +1,5 @@
-// The Envide window: the folder's files in a sidebar, the editor area with its tabs, and a
-// status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
+// The Envide window: the folder's files in a sidebar (folders open and close), the editor
+// area with a tab for the open file, and a status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
 // window, a browser page or a terminal, and the tests drive it with events, no window.
 use envoui as ui;
 use envoui.edit;
@@ -8,7 +8,11 @@ use std.fs;
 use std.path;
 use alloc.text;
 
-const str KEYWORDS = "use namespace struct enum interface impl public private static const var if else for foreach while do break continue return match in ref mut new true false null as is";
+const str KEYWORDS = "use namespace struct enum interface impl public private static const var if else for foreach while do break continue return match in ref out mut new true false null as is where unsafe this void bool str string u8 u16 u32 u64 usize i8 i16 i32 i64 isize f32 f64 List Map Option Result";
+
+// Folders the sidebar leaves out: build output and version control.
+const str SKIP = " build target node_modules ";
+const u32 MAX_DEPTH = 4;
 
 // The palette's commands, in the order they are listed.
 const str CMD_QUIT = "Quit";
@@ -21,12 +25,47 @@ struct Shell {
     u32 Status;      // the status bar's text
     u32 Palette;
     string Folder;
+    string File;     // the open file, or empty
+    List<string> Paths;     // per sidebar item: its full path
+    List<bool> Dirs;        // per sidebar item: a folder?
     bool Quit;       // the user chose Quit
 
-    // What the status bar says: the folder, and where the cursor is.
+    // Opens file (a path, or one relative to the folder) in the editor, and shows it in
+    // the sidebar. False if it cannot be read.
+    public bool Open(ref this, str file) {
+        string full = string.From(file);
+        if (!path.IsAbsolute(file)) {
+            string inFolder = path.Join(this.Folder.AsStr(), file);
+            if (fs.IsFile(inFolder.AsStr()) || !fs.IsFile(file)) full = inFolder;
+        }
+        var r = fs.ReadText(full.AsStr());
+        if (r.IsErr()) return false;
+        string body = r.Unwrap();
+        this.T.SetValue(this.Editor, body.AsStr());
+        this.T.ClearItems(this.Tabs);
+        this.T.AddItem(this.Tabs, path.FileName(full.AsStr()), 0);
+        this.File = string.From(full.AsStr());
+        // the sidebar: its folders open, the file selected
+        for (usize i = 0; i < this.Paths.Len(); i++) {
+            if (this.Dirs.Get(i) && IsInside(full.AsStr(), this.Paths.AsSlice()[i].AsStr())) this.T.SetOpen(this.Files, i, true);
+        }
+        for (usize i = 0; i < this.Paths.Len(); i++) {
+            if (SameText(this.Paths.AsSlice()[i].AsStr(), full.AsStr())) this.T.Select(this.Files, i);
+        }
+        this.T.SetFocus(this.Editor);
+        this.UpdateStatus();
+        return true;
+    }
+
+    // What the status bar says: the folder, or the open file (from the folder), and where
+    // the cursor is.
     public string StatusText(ref this) {
         edit.Pos p = this.T.Buffer(this.Editor)[0].Cursor();
         string s = string.From(this.Folder.AsStr());
+        str file = this.File.AsStr();
+        str dir = this.Folder.AsStr();
+        if (file.Len > 0 && IsInside(file, dir)) s = string.From(file[dir.Len + 1..file.Len]);
+        else if (file.Len > 0) s = string.From(file);
         s.Append("    Ln ");
         s.Append(text.Int((p.Line + 1) as i64).AsStr());
         s.Append(", Col ");
@@ -50,6 +89,13 @@ struct Shell {
         if (id == this.Palette && this.T.Action() == ui.ACT_OPEN) {
             if (SameText(this.T.ItemText(this.Palette, this.T.Item()), CMD_QUIT)) this.Quit = true;
         }
+        if (id == this.Files && (this.T.Action() == ui.ACT_OPEN || this.T.Action() == ui.ACT_SELECT)) {
+            usize i = this.T.Item();
+            if (i < this.Paths.Len() && !this.Dirs.Get(i)) {
+                string p = string.From(this.Paths.AsSlice()[i].AsStr());
+                this.Open(p.AsStr());
+            }
+        }
         this.UpdateStatus();
     }
 }
@@ -68,21 +114,29 @@ Shell NewShell(str folder) {
     u32 ed = t.Editor(area, "");
     t.SetGrow(ed, 1);
     t.SetSyntax(ed, KEYWORDS, "//");
-    u32 status = t.Text(t.Root(), "", ui.CAPTION);
+    u32 bar = t.Row(t.Root());
+    t.SetPadding(bar, ui.XS);
+    u32 status = t.Text(bar, "", ui.CAPTION);
     u32 pal = t.Palette(t.Root());
     t.AddItem(pal, CMD_QUIT, 0);
     t.SetFocus(ed);
-    Shell s = new Shell { T = t, Files = files, Tabs = tabs, Editor = ed, Status = status, Palette = pal, Folder = string.From(folder), Quit = false };
-    ListFolder(ref s.T, files, folder);
+    Shell s = new Shell {
+        T = t, Files = files, Tabs = tabs, Editor = ed, Status = status, Palette = pal, Folder = string.From(folder),
+        File = string.New(), Paths = List<string>.New(), Dirs = List<bool>.New(), Quit = false
+    };
+    s.T.ClearItems(files);
+    ListFolder(ref s, folder, 0);
     s.UpdateStatus();
     return s;
 }
 
-void ListFolder(ref ui.Tree t, u32 files, str folder) {
-    t.ClearItems(files);
+// Adds folder's entries to the sidebar at depth: folders first, then files, each in name
+// order; hidden entries and build output left out.
+void ListFolder(ref Shell s, str folder, u32 depth) {
     var r = fs.ListDir(folder);
     if (r.IsErr()) return;
-    List<string> names = r.Unwrap();
+    List<string> listed = r.Unwrap();
+    List<string> names = SortNames(listed);
     for (u32 pass = 0; pass < 2; pass++) {
         for (usize i = 0; i < names.Len(); i++) {
             str n = names.AsSlice()[i].AsStr();
@@ -90,9 +144,70 @@ void ListFolder(ref ui.Tree t, u32 files, str folder) {
             string full = path.Join(folder, n);
             bool dir = fs.IsDir(full.AsStr());
             if (dir != (pass == 0)) continue;
-            t.AddItem(files, n, 0);
+            if (dir && Skipped(n)) continue;
+            s.T.AddItem(s.Files, n, depth);
+            s.Paths.Push(string.From(full.AsStr()));
+            s.Dirs.Push(dir);
+            if (dir && depth + 1 < MAX_DEPTH) ListFolder(ref s, full.AsStr(), depth + 1);
         }
     }
+}
+
+// names in the order a file browser shows them: letters compare without case.
+List<string> SortNames(in List<string> names) {
+    List<string> sorted = List<string>.New();
+    List<bool> taken = List<bool>.New();
+    for (usize i = 0; i < names.Len(); i++) taken.Push(false);
+    for (usize k = 0; k < names.Len(); k++) {
+        usize best = names.Len();
+        for (usize i = 0; i < names.Len(); i++) {
+            if (taken.Get(i)) continue;
+            if (best == names.Len() || Before(names.AsSlice()[i].AsStr(), names.AsSlice()[best].AsStr())) best = i;
+        }
+        taken.Set(best, true);
+        sorted.Push(string.From(names.AsSlice()[best].AsStr()));
+    }
+    return sorted;
+}
+
+// Does a come before b, ignoring case (and by case where that is all they differ in)?
+bool Before(str a, str b) {
+    usize n = a.Len;
+    if (b.Len < n) n = b.Len;
+    for (usize i = 0; i < n; i++) {
+        u8 x = LowerByte(a[i]);
+        u8 y = LowerByte(b[i]);
+        if (x != y) return x < y;
+    }
+    if (a.Len != b.Len) return a.Len < b.Len;
+    for (usize i = 0; i < n; i++) {
+        if (a[i] != b[i]) return a[i] < b[i];
+    }
+    return false;
+}
+
+u8 LowerByte(u8 c) {
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    return c;
+}
+
+bool Skipped(str name) {
+    string padded = string.From(" ");
+    padded.Append(name);
+    padded.Append(" ");
+    str k = padded.AsStr();
+    str all = SKIP;
+    for (usize i = 0; i + k.Len <= all.Len; i++) {
+        if (SameText(all[i..i + k.Len], k)) return true;
+    }
+    return false;
+}
+
+// Is p inside folder dir (a path that starts with dir and a separator)?
+bool IsInside(str p, str dir) {
+    if (p.Len <= dir.Len + 1) return false;
+    if (!SameText(p[0..dir.Len], dir)) return false;
+    return p[dir.Len] == '/' || p[dir.Len] == 92;
 }
 
 bool SameText(str a, str b) {
