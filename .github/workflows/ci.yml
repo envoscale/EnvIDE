@@ -60,4 +60,5 @@ jobs:
           merge-multiple: true
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envo Studio $GITHUB_REF_NAME" --notes "The Studio shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envo Studio $GITHUB_REF_NAME" --notes "The Studio shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."
