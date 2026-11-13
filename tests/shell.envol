@@ -9,7 +9,7 @@
 // expect: text: hi|
 // expect: quit: false
 // expect: quit: true
-use envo.lumen;
+use envor.theme;
 use ports.{Event, EventKind, KEY_A, KEY_ENTER, MOD_CTRL, MOD_SHIFT};
 use std.fs;
 
@@ -20,7 +20,7 @@ fs.WriteText("shell-test/notes.md", "# Notes\n");
 fs.WriteText("shell-test/.hidden", "");
 
 Shell s = NewShell("shell-test");
-lumen.Theme th = lumen.Dark();
+theme.Theme th = theme.Dark();
 s.T.LayoutCells(th, 100, 30);
 
 string items = string.From("sidebar: ");

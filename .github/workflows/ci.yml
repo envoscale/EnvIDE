@@ -1,5 +1,5 @@
-# Builds Studio with EnvoScale at envoscale.ref and runs its tests on Linux and Windows;
-# on Linux it also opens Studio's window under a virtual X server and draws a frame.
+# Builds Envide with EnvoScale at envoscale.ref and runs its tests on Linux and Windows;
+# on Linux it also opens Envide's window under a virtual X server and draws a frame.
 name: ci
 
 on:
@@ -20,14 +20,14 @@ jobs:
       - run: ./build.sh test
       - run: ./build.sh build
       - run: |
-          out=$(xvfb-run -a build/studio --one-frame)
+          out=$(xvfb-run -a build/envide --one-frame)
           echo "$out"
-          [ "$out" = "studio: drew a frame" ]
-      - run: cp build/studio studio-x86_64-linux
+          [ "$out" = "envide: drew a frame" ]
+      - run: cp build/envide envide-x86_64-linux
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: studio-linux
-          path: studio-x86_64-linux
+          name: envide-linux
+          path: envide-x86_64-linux
 
   windows:
     runs-on: windows-latest
@@ -39,14 +39,14 @@ jobs:
         shell: bash
       - run: ./build.sh build
         shell: bash
-      - run: cp build/studio.exe studio-x86_64-windows.exe
+      - run: cp build/envide.exe envide-x86_64-windows.exe
         shell: bash
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: studio-windows
-          path: studio-x86_64-windows.exe
+          name: envide-windows
+          path: envide-x86_64-windows.exe
 
-  # A tag v* publishes Studio for Linux and Windows.
+  # A tag v* publishes Envide for Linux and Windows.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [linux, windows]
@@ -61,4 +61,4 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envo Studio $GITHUB_REF_NAME" --notes "The Studio shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "Envide $GITHUB_REF_NAME" --notes "The Envide shell: a sidebar with the folder's files, tabs, the code editor, a status bar and a command palette (Ctrl+Shift+P). Run it in a folder to see that folder. Built with EnvoScale at the commit in envoscale.ref."

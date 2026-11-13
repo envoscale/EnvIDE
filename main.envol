@@ -1,8 +1,8 @@
-// Envo Studio in a window: the shell (shell.envo), drawn each time nothing is waiting.
-// `studio --one-frame` draws one frame and quits, for CI.
-use envo.gfx;
-use envo.font;
-use envo.lumen;
+// Envide in a window: the shell (shell.envol), drawn each time nothing is waiting.
+// `envide --one-frame` draws one frame and quits, for CI.
+use envor.gfx;
+use envor.font;
+use envor.theme;
 use ports.{EventKind};
 use std.env;
 use platform;
@@ -10,16 +10,16 @@ use platform;
 bool oneFrame = env.ArgCount() > 1 && SameText(env.Arg(1), "--one-frame");
 var loaded = font.System("monospace");
 if (loaded.IsErr()) {
-    print("Envo Studio needs a monospace font, and this system has none it knows");
+    print("Envide needs a monospace font, and this system has none it knows");
     return 1;
 }
 font.Font f = loaded.Unwrap();
-lumen.Theme th = lumen.Dark();
+theme.Theme th = theme.Dark();
 Shell s = NewShell(env.CurrentDir().AsStr());
 
 var w = platform.Window();
-if (!w.Open("Envo Studio", 1100, 700)) {
-    print("Envo Studio needs a desktop: this system cannot open a window");
+if (!w.Open("Envide", 1100, 700)) {
+    print("Envide needs a desktop: this system cannot open a window");
     return 1;
 }
 u32 width = w.Width();
@@ -32,7 +32,7 @@ while (w.IsOpen() && !s.Quit) {
         s.T.DrawPixels(ref c, f, th);
         w.Present(c.Pixels(), width, height);
         if (oneFrame) {
-            print("studio: drew a frame");
+            print("envide: drew a frame");
             break;
         }
         continue;

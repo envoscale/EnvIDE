@@ -1,9 +1,9 @@
 #!/bin/sh
-# Builds and tests Envo Studio with EnvoScale at the commit in envoscale.ref.
+# Builds and tests Envide with EnvoScale at the commit in envoscale.ref.
 #
-#   ./build.sh build   build/studio (build/studio.exe on Windows)
+#   ./build.sh build   build/envide (build/envide.exe on Windows)
 #   ./build.sh test    the tests in tests/
-#   ./build.sh run     build, then open Studio on this folder
+#   ./build.sh run     build, then open Envide on this folder
 #
 # EnvoScale comes from $ENVOSCALE if set (a checkout you work on, used as it is), else
 # ./envoscale, cloned and built at envoscale.ref on first use.
@@ -39,7 +39,7 @@ toolchain() {
 case "${1:-help}" in
     build) toolchain; (cd "$ROOT" && "$ENVO" build) ;;
     test)  toolchain; (cd "$ROOT" && "$ENVO" test) ;;
-    run)   toolchain; (cd "$ROOT" && "$ENVO" build) && "$ROOT/build/studio$EXE" ;;
+    run)   toolchain; (cd "$ROOT" && "$ENVO" build) && "$ROOT/build/envide$EXE" ;;
     *)
         say 'usage: ./build.sh <build|test|run>'
         [ "${1:-help}" = help ] || exit 2 ;;

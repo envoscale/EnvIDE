@@ -1,8 +1,8 @@
-// The Studio window: the folder's files in a sidebar, the editor area with its tabs, and a
+// The Envide window: the folder's files in a sidebar, the editor area with its tabs, and a
 // status bar. The shell only builds and updates a ui.Tree, so the same code draws into a
 // window, a browser page or a terminal, and the tests drive it with events, no window.
-use envo.ui;
-use envo.edit;
+use envoui as ui;
+use envoui.edit;
 use ports.{Event, EventKind, KEY_A, MOD_CTRL, MOD_SHIFT};
 use std.fs;
 use std.path;

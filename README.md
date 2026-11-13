@@ -1,12 +1,12 @@
 <img src="https://raw.githubusercontent.com/envoscale/EnvoScale/main/docs/images/logo.svg" alt="" width="56" align="left">
 
-# Envo Studio
+# Envide
 
-A code editor and IDE written in [Envo](https://github.com/envoscale/EnvoScale), on Envo's
+A code editor and IDE written in [Envol](https://github.com/envoscale/EnvoScale), on Envol's
 own standard library: no third-party code, and the same program on Windows, Linux and
 (later) in the browser.
 
-![Envo Studio](docs/studio.png)
+![Envide](docs/envide.png)
 
 **Where it is:** the shell. A sidebar with the folder's files, tabs, the code editor with
 syntax colors, a status bar with the cursor's position, and a command palette
@@ -20,18 +20,18 @@ go-to-definition through `envo lsp`, then build, run, test and debug.
 ```
 
 This clones EnvoScale at the commit in [`envoscale.ref`](envoscale.ref), builds it (about
-a minute, once), then builds and opens Studio. `./build.sh test` runs the tests. To use an
+a minute, once), then builds and opens Envide. `./build.sh test` runs the tests. To use an
 EnvoScale checkout you are working on, set `ENVOSCALE` to its folder.
 
 ## Code
 
 | File | |
 |---|---|
-| [`shell.envo`](shell.envo) | The window's parts and what input does to them. It never touches the window, so the tests drive it directly. |
-| [`main.envo`](main.envo) | Opens the window and runs the loop |
+| [`shell.envol`](shell.envol) | The window's parts and what input does to them. It never touches the window, so the tests drive it directly. |
+| [`main.envol`](main.envol) | Opens the window and runs the loop |
 | [`tests/`](tests) | Tests, run by `envo test` |
 
-Anything Studio needs from the operating system is a port in EnvoScale's library with
+Anything Envide needs from the operating system is a port in EnvoScale's library with
 adapters there, never code here.
 
 ## License
