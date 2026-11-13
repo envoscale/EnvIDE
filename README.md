@@ -56,4 +56,4 @@ adapters there, never code here.
 
 ## License
 
-Same as EnvoScale: see [LICENSE](LICENSE).
+Same as EnvoLang: see [LICENSE](LICENSE).

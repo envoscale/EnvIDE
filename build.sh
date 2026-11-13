@@ -1,9 +1,9 @@
 #!/bin/sh
-# Builds and tests Envide with EnvoScale at the commit in envolang.ref.
+# Builds and tests EnvIDE with EnvoScale at the commit in envolang.ref.
 #
 #   ./build.sh build   build/envide (build/envide.exe on Windows)
 #   ./build.sh test    the tests in tests/
-#   ./build.sh run     build, then open Envide on this folder
+#   ./build.sh run     build, then open EnvIDE on this folder
 #
 # EnvoScale comes from $ENVOLANG if set (a checkout you work on, used as it is), else
 # ./envolang, cloned and built at envolang.ref on first use.
